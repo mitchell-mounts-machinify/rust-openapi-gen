@@ -1,15 +1,14 @@
-//! Simple stonehm implementation without serde dependencies
+//! Simple machined-openapi-gen implementation without serde dependencies
 
 use axum::Router;
 use std::collections::HashMap;
 
-// Re-export Axum types so users can import everything from stonehm
+// Re-export Axum types so users can import everything from machined-openapi-gen
 pub use axum::{
     Router as AxumRouter,
     extract::{Path, Query, State},
     http::StatusCode,
     response::{Json, Response},
-    routing::{MethodRouter, get, post, put, delete, patch},
     handler::Handler,
 };
 
@@ -126,9 +125,125 @@ pub struct License {
 pub struct PathItem;
 
 // Simple trait for schema generation
-pub trait StonehmSchema {
+pub trait OpenApiSchema {
     fn schema() -> String {
         r#"{"type":"object"}"#.to_string()
+    }
+}
+
+// Wrapper around axum::routing::MethodRouter that carries handler metadata
+pub struct MethodRouter<S = ()> {
+    inner: axum::routing::MethodRouter<S>,
+    handler_names: std::collections::HashMap<String, String>, // method -> handler_name
+}
+
+impl<S> MethodRouter<S> 
+where
+    S: Clone + Send + Sync + 'static,
+{
+    pub fn new(inner: axum::routing::MethodRouter<S>) -> Self {
+        Self {
+            inner,
+            handler_names: std::collections::HashMap::new(),
+        }
+    }
+    
+    pub fn with_handler_name(mut self, method: &str, handler_name: String) -> Self {
+        self.handler_names.insert(method.to_uppercase(), handler_name);
+        self
+    }
+    
+    pub fn get_handler_name(&self, method: &str) -> Option<&String> {
+        self.handler_names.get(&method.to_uppercase())
+    }
+    
+    pub fn into_axum_method_router(self) -> axum::routing::MethodRouter<S> {
+        self.inner
+    }
+    
+    pub fn handler_names(&self) -> &std::collections::HashMap<String, String> {
+        &self.handler_names
+    }
+    
+    // Chaining methods for combining MethodRouters
+    pub fn get<H, T>(mut self, handler: H) -> Self
+    where
+        H: axum::handler::Handler<T, S>,
+        T: 'static,
+    {
+        let fn_name = std::any::type_name::<H>()
+            .split("::")
+            .last()
+            .unwrap_or("unknown")
+            .to_string();
+        
+        self.inner = self.inner.get(handler);
+        self.handler_names.insert("GET".to_string(), fn_name);
+        self
+    }
+    
+    pub fn post<H, T>(mut self, handler: H) -> Self
+    where
+        H: axum::handler::Handler<T, S>,
+        T: 'static,
+    {
+        let fn_name = std::any::type_name::<H>()
+            .split("::")
+            .last()
+            .unwrap_or("unknown")
+            .to_string();
+        
+        self.inner = self.inner.post(handler);
+        self.handler_names.insert("POST".to_string(), fn_name);
+        self
+    }
+    
+    pub fn put<H, T>(mut self, handler: H) -> Self
+    where
+        H: axum::handler::Handler<T, S>,
+        T: 'static,
+    {
+        let fn_name = std::any::type_name::<H>()
+            .split("::")
+            .last()
+            .unwrap_or("unknown")
+            .to_string();
+        
+        self.inner = self.inner.put(handler);
+        self.handler_names.insert("PUT".to_string(), fn_name);
+        self
+    }
+    
+    pub fn delete<H, T>(mut self, handler: H) -> Self
+    where
+        H: axum::handler::Handler<T, S>,
+        T: 'static,
+    {
+        let fn_name = std::any::type_name::<H>()
+            .split("::")
+            .last()
+            .unwrap_or("unknown")
+            .to_string();
+        
+        self.inner = self.inner.delete(handler);
+        self.handler_names.insert("DELETE".to_string(), fn_name);
+        self
+    }
+    
+    pub fn patch<H, T>(mut self, handler: H) -> Self
+    where
+        H: axum::handler::Handler<T, S>,
+        T: 'static,
+    {
+        let fn_name = std::any::type_name::<H>()
+            .split("::")
+            .last()
+            .unwrap_or("unknown")
+            .to_string();
+        
+        self.inner = self.inner.patch(handler);
+        self.handler_names.insert("PATCH".to_string(), fn_name);
+        self
     }
 }
 
@@ -149,20 +264,129 @@ impl ApiRouter<()> {
             used_schemas: std::collections::HashSet::new(),
         }
     }
-
-    // Use into_router().with_state(your_state) for state management
 }
 
 impl<S> ApiRouter<S>
 where
     S: Clone + Send + Sync + 'static,
 {
-    pub fn route(mut self, path: &str, method_router: axum::routing::MethodRouter<S>) -> Self {
-        self.router = self.router.route(path, method_router);
-        self
+    pub fn with_state_type(title: &str, version: &str) -> Self {
+        Self {
+            router: Router::new(),
+            openapi: OpenAPI::new(title, version),
+            routes: Vec::new(),
+            used_schemas: std::collections::HashSet::new(),
+        }
     }
 
-    pub fn get<H, T>(mut self, path: &str, handler: H) -> Self
+    // Use into_router().with_state(your_state) for state management
+    pub fn route(mut self, path: &str, method_router: MethodRouter<S>) -> Self {
+        // Extract handler names and create RouteInfo entries
+        for (method, handler_name) in method_router.handler_names() {
+            self.routes.push(RouteInfo {
+                path: path.to_string(),
+                method: method.clone(),
+                function_name: handler_name.clone(),
+                summary: Some(format!("{} {}", method, path)),
+                description: None,
+            });
+        }
+        
+        // Update OpenAPI spec
+        self.openapi.paths.insert(path.to_string(), PathItem);
+        
+        // Delegate to Axum's route method
+        self.router = self.router.route(path, method_router.into_axum_method_router());
+        self
+    }
+}
+
+// Provide MethodRouter creation functions that track OpenAPI info
+pub fn get<H, T, S>(handler: H) -> MethodRouter<S>
+where
+    H: axum::handler::Handler<T, S>,
+    T: 'static,
+    S: Clone + Send + Sync + 'static,
+{
+    // Extract function name for OpenAPI documentation
+    let fn_name = std::any::type_name::<H>()
+        .split("::")
+        .last()
+        .unwrap_or("unknown")
+        .to_string();
+
+    // Create MethodRouter wrapper with handler name tracking
+    MethodRouter::new(axum::routing::get(handler))
+        .with_handler_name("GET", fn_name)
+}
+
+pub fn post<H, T, S>(handler: H) -> MethodRouter<S>
+where
+    H: axum::handler::Handler<T, S>,
+    T: 'static,
+    S: Clone + Send + Sync + 'static,
+{
+    let fn_name = std::any::type_name::<H>()
+        .split("::")
+        .last()
+        .unwrap_or("unknown")
+        .to_string();
+    
+    MethodRouter::new(axum::routing::post(handler))
+        .with_handler_name("POST", fn_name)
+}
+
+pub fn put<H, T, S>(handler: H) -> MethodRouter<S>
+where
+    H: axum::handler::Handler<T, S>,
+    T: 'static,
+    S: Clone + Send + Sync + 'static,
+{
+    let fn_name = std::any::type_name::<H>()
+        .split("::")
+        .last()
+        .unwrap_or("unknown")
+        .to_string();
+    
+    MethodRouter::new(axum::routing::put(handler))
+        .with_handler_name("PUT", fn_name)
+}
+
+pub fn delete<H, T, S>(handler: H) -> MethodRouter<S>
+where
+    H: axum::handler::Handler<T, S>,
+    T: 'static,
+    S: Clone + Send + Sync + 'static,
+{
+    let fn_name = std::any::type_name::<H>()
+        .split("::")
+        .last()
+        .unwrap_or("unknown")
+        .to_string();
+    
+    MethodRouter::new(axum::routing::delete(handler))
+        .with_handler_name("DELETE", fn_name)
+}
+
+pub fn patch<H, T, S>(handler: H) -> MethodRouter<S>
+where
+    H: axum::handler::Handler<T, S>,
+    T: 'static,
+    S: Clone + Send + Sync + 'static,
+{
+    let fn_name = std::any::type_name::<H>()
+        .split("::")
+        .last()
+        .unwrap_or("unknown")
+        .to_string();
+    
+    MethodRouter::new(axum::routing::patch(handler))
+        .with_handler_name("PATCH", fn_name)
+}
+
+// Commented out original methods - can be restored if the new approach doesn't work
+/*
+pub fn get<H, T>(mut self, path: &str, handler: H) -> Self
     where
         H: axum::handler::Handler<T, S>,
         T: 'static,
@@ -290,7 +514,12 @@ where
         self.router = self.router.route(path, patch(handler));
         self
     }
+*/
 
+impl<S> ApiRouter<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
     pub fn openapi_spec(&self) -> &OpenAPI {
         &self.openapi
     }
@@ -480,7 +709,8 @@ where
                 // Build proper OpenAPI method object
                 let mut method_parts = vec![
                     format!(r#""summary": "{}""#, summary.replace("\"", "\\\"")),
-                    format!(r#""description": "{}""#, description.replace("\"", "\\\""))
+                    format!(r#""description": "{}""#, description.replace("\"", "\\\"")),
+                    format!(r#""x-handler-function": "{}""#, route.function_name)
                 ];
 
                 // Add tags if present
@@ -1118,10 +1348,10 @@ where
         let json_spec = self.openapi_json();
         let yaml_spec = self.openapi.to_yaml();
         let router = self.router
-            .route("/openapi.json", crate::get(move || async move {
+            .route("/openapi.json", axum::routing::get(move || async move {
                 axum::Json(json_spec)
             }))
-            .route("/openapi.yaml", crate::get(move || async move {
+            .route("/openapi.yaml", axum::routing::get(move || async move {
                 ([("content-type", "application/yaml")], yaml_spec)
             }));
 
@@ -1145,10 +1375,10 @@ where
         let yaml_path = format!("{normalized_prefix}.yaml");
 
         let router = self.router
-            .route(&json_path, get(move || async move {
+            .route(&json_path, axum::routing::get(move || async move {
                 axum::Json(json_spec)
             }))
-            .route(&yaml_path, get(move || async move {
+            .route(&yaml_path, axum::routing::get(move || async move {
                 ([("content-type", "application/yaml")], yaml_spec)
             }));
 
@@ -1201,7 +1431,7 @@ pub use inventory;
 pub use serde_json;
 
 // Re-export proc macros
-pub use stonehm_macros::{api_handler, StonehmSchema, api_error};
+pub use machined_openapi_gen_macros::{api_handler, OpenApiSchema, api_error};
 
 // Mock serde for compatibility
 pub mod serde {
@@ -1670,6 +1900,60 @@ mod tests {
 
         // Note: We can't fully test route tracking without proper handler types,
         // but we can verify the structure exists and basic operations work
+    }
+}
+
+#[cfg(test)]
+mod handler_name_tests {
+    use super::*;
+
+    async fn test_handler() -> &'static str {
+        "test"
+    }
+
+    #[test]
+    fn test_handler_name_tracking() {
+        let router: ApiRouter<()> = ApiRouter::new("Test API", "1.0.0")
+            .route("/test", get(test_handler));
+
+        // Check that the route is tracked
+        assert_eq!(router.routes.len(), 1);
+        let route = &router.routes[0];
+        assert_eq!(route.path, "/test");
+        assert_eq!(route.method, "GET");
+        assert_eq!(route.function_name, "test_handler");
+    }
+
+    #[test]
+    fn test_multiple_methods_tracking() {
+        async fn get_items() -> &'static str { "items" }
+        async fn create_item() -> &'static str { "created" }
+
+        let router: ApiRouter<()> = ApiRouter::new("Test API", "1.0.0")
+            .route("/items", get(get_items).post(create_item));
+
+        // Should have 2 routes tracked
+        assert_eq!(router.routes.len(), 2);
+        
+        let get_route = router.routes.iter().find(|r| r.method == "GET").unwrap();
+        assert_eq!(get_route.function_name, "get_items");
+        
+        let post_route = router.routes.iter().find(|r| r.method == "POST").unwrap();
+        assert_eq!(post_route.function_name, "create_item");
+    }
+
+    #[test]
+    fn test_openapi_includes_handler_names() {
+        async fn list_users() -> &'static str { "users" }
+
+        let mut router: ApiRouter<()> = ApiRouter::new("Test API", "1.0.0")
+            .route("/users", get(list_users));
+
+        let openapi_json = router.openapi_json();
+        
+        // Should contain the path and handler metadata
+        assert!(openapi_json.contains("\"/users\""));
+        assert!(openapi_json.contains("GET /users"));
     }
 }
 

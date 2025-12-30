@@ -4,32 +4,32 @@ use axum::{
     http::StatusCode,
 };
 use serde::{Deserialize, Serialize};
-use stonehm::{api_router, api_handler, StonehmSchema, api_error};
+use machined_openapi_gen::{api_router, api_handler, OpenApiSchema, api_error};
 
-#[derive(Serialize, StonehmSchema)]
+#[derive(Serialize, OpenApiSchema)]
 struct HelloResponse {
     message: String,
 }
 
-#[derive(Deserialize, StonehmSchema)]
+#[derive(Deserialize, OpenApiSchema)]
 struct CreateUserRequest {
     name: String,
     email: String,
 }
 
-#[derive(Deserialize, StonehmSchema)]
+#[derive(Deserialize, OpenApiSchema)]
 struct GreetRequest {
     name: Option<String>,
     style: Option<String>,
 }
 
-#[derive(Serialize, StonehmSchema)]
+#[derive(Serialize, OpenApiSchema)]
 struct GreetResponse {
     message: String,
     style: String,
 }
 
-#[derive(Debug, Serialize, StonehmSchema)]
+#[derive(Debug, Serialize, OpenApiSchema)]
 struct UserResponse {
     id: u32,
     name: String,
@@ -268,7 +268,7 @@ async fn main() {
     }
     if std::env::args().any(|arg| arg == "--test-schema") {
         let mut router = api_router!("Hello World API", "1.0.0")
-            .description("A comprehensive example API demonstrating stonehm's automatic OpenAPI generation capabilities. This API showcases various endpoint types, request/response schemas, error handling, and documentation features.")
+            .description("A comprehensive example API demonstrating machined-openapi-gen's automatic OpenAPI generation capabilities. This API showcases various endpoint types, request/response schemas, error handling, and documentation features.")
             .terms_of_service("https://example.com/terms")
             .contact(Some("API Support Team"), Some("https://example.com/support"), Some("support@example.com"))
             .license("MIT", Some("https://opensource.org/licenses/MIT"))
@@ -278,8 +278,8 @@ async fn main() {
             .tag("admin", Some("Administrative operations requiring elevated permissions"))
             .get("/", hello)
             .post("/greet", greet) 
-            .get("/users/:id", get_user)
-            .delete("/users/:id", delete_user)
+            .get("/users/{id}", get_user)
+            .delete("/users/{id}", delete_user)
             .post("/users", create_user_with_errors);
             
         println!("{}", router.openapi_json());
@@ -289,8 +289,8 @@ async fn main() {
     let router = axum::Router::new()
         .route("/", axum::routing::get(hello))
         .route("/greet", axum::routing::post(greet)) 
-        .route("/users/:id", axum::routing::get(get_user))
-        .route("/users/:id", axum::routing::delete(delete_user))
+        .route("/users/{id}", axum::routing::get(get_user))
+        .route("/users/{id}", axum::routing::delete(delete_user))
         .route("/users", axum::routing::post(create_user_with_errors));
     
     let app = router

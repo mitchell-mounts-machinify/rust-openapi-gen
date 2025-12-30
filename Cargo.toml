@@ -1,16 +1,16 @@
 [package]
-name = "stonehm"
+name = "machined-openapi-gen"
 version = "0.1.3"
 edition = "2021"
 description = "Automatic OpenAPI 3.0 generation for Axum applications"
 license = "MIT"
-repository = "https://github.com/melito/stonehm"
+repository = "https://github.com/mitchell.mounts/rust-openapi-gen"
 readme = "README.md"
 keywords = ["openapi", "axum", "api", "documentation", "swagger"]
 categories = ["web-programming", "api-bindings"]
 
 [workspace]
-members = ["examples/hello_world", "stonehm-macros"]
+members = ["examples/hello_world", "machined-openapi-gen-macros"]
 
 [dependencies]
 axum = { version = "0.8.1", default-features = false, features = ["json", "query"] }
@@ -22,4 +22,4 @@ indexmap = "2.0"
 serde_json = "1.0"
 
 # Macros crate
-stonehm-macros = { version = "0.1.0", path = "stonehm-macros" }
+machined-openapi-gen-macros = { version = "0.1.0", path = "machined-openapi-gen-macros" }

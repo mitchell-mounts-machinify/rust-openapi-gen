@@ -1,6 +1,6 @@
-# stonehm - Documentation-Driven OpenAPI Generation for Axum
+# machined-openapi-gen - Documentation-Driven OpenAPI Generation for Axum
 
-stonehm automatically generates comprehensive OpenAPI 3.0 specifications for Axum web applications by analyzing handler functions and their documentation. The core principle is **"documentation is the spec"** - write clear, natural documentation and get complete OpenAPI specs automatically.
+machined-openapi-gen automatically generates comprehensive OpenAPI 3.0 specifications for Axum web applications by analyzing handler functions and their documentation. The core principle is **"documentation is the spec"** - write clear, natural documentation and get complete OpenAPI specs automatically.
 
 ## Key Features
 
@@ -18,8 +18,8 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-stonehm = "0.1"
-stonehm-macros = "0.1"
+machined-openapi-gen = "0.1"
+machined-openapi-gen-macros = "0.1"
 axum = "0.7"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -30,11 +30,11 @@ serde = { version = "1.0", features = ["derive"] }
 ```rust
 use axum::{Json, extract::Path};
 use serde::{Serialize, Deserialize};
-use stonehm::{api_router, api_handler};
-use stonehm_macros::{StonehmSchema, api_error};
+use machined_openapi_gen::{api_router, api_handler};
+use machined_openapi_gen_macros::{MachinedSchema, api_error};
 
 // Define your data types
-#[derive(Serialize, StonehmSchema)]
+#[derive(Serialize, MachinedSchema)]
 struct User {
     id: u32,
     name: String,
@@ -88,11 +88,11 @@ async fn main() {
 
 ## Documentation Approaches
 
-stonehm supports three documentation approaches to fit different needs:
+machined-openapi-gen supports three documentation approaches to fit different needs:
 
 ### 1. Automatic Documentation (Recommended)
 
-Let stonehm infer everything from your code structure:
+Let machined-openapi-gen infer everything from your code structure:
 
 ```rust
 /// Get user profile
@@ -183,13 +183,13 @@ async fn delete_user(Path(id): Path<u32>) -> Result<(), ApiError> {
 
 ## Schema Generation
 
-stonehm uses the `StonehmSchema` derive macro for automatic schema generation:
+machined-openapi-gen uses the `MachinedSchema` derive macro for automatic schema generation:
 
 ```rust
 use serde::{Serialize, Deserialize};
-use stonehm_macros::StonehmSchema;
+use machined_openapi_gen_macros::MachinedSchema;
 
-#[derive(Serialize, Deserialize, StonehmSchema)]
+#[derive(Serialize, Deserialize, MachinedSchema)]
 struct CreateUserRequest {
     name: String,
     email: String,
@@ -197,7 +197,7 @@ struct CreateUserRequest {
     preferences: UserPreferences,
 }
 
-#[derive(Serialize, StonehmSchema)]
+#[derive(Serialize, MachinedSchema)]
 struct UserResponse {
     id: u32,
     name: String,
@@ -232,7 +232,7 @@ enum ApiError {
 ### Basic Setup
 
 ```rust
-use stonehm::api_router;
+use machined_openapi_gen::api_router;
 
 #[tokio::main]
 async fn main() {
@@ -375,7 +375,7 @@ responses:
 ### 2. Use api_error Macro for Error Types
 
 ```rust
-use stonehm_macros::api_error;
+use machined_openapi_gen_macros::api_error;
 
 #[api_error]
 enum ApiError {
@@ -390,7 +390,7 @@ enum ApiError {
 }
 ```
 
-The `api_error` macro automatically generates `IntoResponse`, `Serialize`, and `StonehmSchema` implementations, eliminating all boilerplate.
+The `api_error` macro automatically generates `IntoResponse`, `Serialize`, and `MachinedSchema` implementations, eliminating all boilerplate.
 
 ### 3. Keep Documentation Natural
 
@@ -436,7 +436,7 @@ Focus on business logic, not OpenAPI details:
 A: Ensure your function returns `Result<Json<T>, E>` and `E` implements `IntoResponse`.
 
 **Q: Schemas aren't in the OpenAPI spec**  
-A: Add `#[derive(StonehmSchema)]` to your types and use them in function signatures.
+A: Add `#[derive(MachinedSchema)]` to your types and use them in function signatures.
 
 **Q: Path parameters not documented**  
 A: Add them to the `# Parameters` section with `(path)` type specification.
@@ -452,7 +452,7 @@ A: Use the elaborate response format with explicit schema references.
 |-------|---------|---------|
 | `api_router!(title, version)` | Create documented router | `api_router!("My API", "1.0.0")` |
 | `#[api_handler]` | Mark handler for documentation | `#[api_handler] async fn get_user() {}` |
-| `#[derive(StonehmSchema)]` | Generate JSON schema | `#[derive(Serialize, StonehmSchema)] struct User {}` |
+| `#[derive(MachinedSchema)]` | Generate JSON schema | `#[derive(Serialize, MachinedSchema)] struct User {}` |
 
 ### Router Methods
 
@@ -490,10 +490,10 @@ let app = api_router!("API", "1.0.0")
 ```rust
 use axum::{Json, extract::{Path, Query}};
 use serde::{Serialize, Deserialize};
-use stonehm::{api_router, api_handler};
-use stonehm_macros::StonehmSchema;
+use machined_openapi_gen::{api_router, api_handler};
+use machined_openapi_gen_macros::MachinedSchema;
 
-#[derive(Serialize, Deserialize, StonehmSchema)]
+#[derive(Serialize, Deserialize, MachinedSchema)]
 struct User {
     id: u32,
     name: String,
@@ -501,7 +501,7 @@ struct User {
     created_at: String,
 }
 
-#[derive(Deserialize, StonehmSchema)]
+#[derive(Deserialize, MachinedSchema)]
 struct CreateUserRequest {
     name: String,
     email: String,
@@ -589,8 +589,8 @@ async fn main() {
 
 ```bash
 # Clone the repository
-git clone https://github.com/melito/stonehm.git
-cd stonehm
+git clone https://github.com/melito/machined-openapi-gen.git
+cd machined-openapi-gen
 
 # Run the example server
 cargo run -p hello_world
@@ -619,13 +619,13 @@ cargo run -p hello_world -- --test-schema | jq '.components.schemas'
 
 ### Compile-Time Registration System
 
-stonehm uses the [`inventory`](https://crates.io/crates/inventory) crate to implement a compile-time registration system that collects API documentation and schema information from across your entire codebase.
+machined-openapi-gen uses the [`inventory`](https://crates.io/crates/inventory) crate to implement a compile-time registration system that collects API documentation and schema information from across your entire codebase.
 
 #### How It Works
 
 **1. Registration Structs**
 
-stonehm defines two core registration types:
+machined-openapi-gen defines two core registration types:
 
 ```rust
 #[derive(Debug, Clone)]
@@ -666,7 +666,7 @@ async fn get_user(Path(id): Path<u32>) -> Result<Json<User>, ApiError> { ... }
 
 // The macro generates:
 inventory::submit! {
-    stonehm::HandlerDocumentation {
+    machined_openapi_gen::HandlerDocumentation {
         function_name: "get_user",
         summary: "Get user by ID",
         description: "Retrieves user information using their unique identifier",
@@ -678,11 +678,11 @@ inventory::submit! {
 }
 ```
 
-Similarly, `#[derive(StonehmSchema)]` generates schema registrations:
+Similarly, `#[derive(MachinedSchema)]` generates schema registrations:
 
 ```rust
 // For a struct like:
-#[derive(Serialize, StonehmSchema)]
+#[derive(Serialize, MachinedSchema)]
 struct User {
     id: u32,
     name: String,
@@ -691,7 +691,7 @@ struct User {
 
 // The macro generates:
 inventory::submit! {
-    stonehm::SchemaRegistration {
+    machined_openapi_gen::SchemaRegistration {
         type_name: "User",
         schema_json: r#"{"type":"object","properties":{"id":{"type":"integer"},"name":{"type":"string"},"email":{"type":"string"}},"required":["id","name","email"]}"#,
     }
@@ -751,7 +751,7 @@ This system provides **zero runtime overhead** because:
 
 #### Schema Usage Tracking
 
-stonehm automatically tracks which schemas are actually used in your API:
+machined-openapi-gen automatically tracks which schemas are actually used in your API:
 
 ```rust
 // Only include schemas that are referenced in handler signatures
@@ -769,7 +769,7 @@ for unused in registered_schemas.difference(&used_schemas) {
 }
 ```
 
-### Extending stonehm
+### Extending machined-openapi-gen
 
 #### Adding Custom Schema Types
 
@@ -848,10 +848,10 @@ cargo test --workspace
 
 Key files to understand:
 - `src/lib.rs` - Core `ApiRouter` and inventory system  
-- `stonehm-macros/src/lib.rs` - `#[api_handler]` and `#[derive(StonehmSchema)]` macros
+- `machined-openapi-gen-macros/src/lib.rs` - `#[api_handler]` and `#[derive(MachinedSchema)]` macros
 - `examples/hello_world/` - Complete working example
 
-The inventory system is the heart of stonehm - understanding how `inventory::submit!` and `inventory::iter()` work is crucial for contributing.
+The inventory system is the heart of machined-openapi-gen - understanding how `inventory::submit!` and `inventory::iter()` work is crucial for contributing.
 
 ## License
 
@@ -859,4 +859,4 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ---
 
-**[Documentation](https://docs.rs/stonehm) | [Crates.io](https://crates.io/crates/stonehm) | [Repository](https://github.com/melito/stonehm)**
+**[Documentation](https://docs.rs/machined-openapi-gen) | [Crates.io](https://crates.io/crates/machined-openapi-gen) | [Repository](https://github.com/melito/machined-openapi-gen)**

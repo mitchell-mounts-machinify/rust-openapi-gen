@@ -660,8 +660,8 @@ pub fn api_handler(attr: TokenStream, item: TokenStream) -> TokenStream {
         #input
 
         // Register handler documentation at compile time
-        stonehm::inventory::submit! {
-            stonehm::HandlerDocumentation {
+        machined_openapi_gen::inventory::submit! {
+            machined_openapi_gen::HandlerDocumentation {
                 function_name: #fn_name_str,
                 summary: #summary,
                 description: #description,
@@ -683,7 +683,7 @@ pub fn documented_router(_input: TokenStream) -> TokenStream {
     // For now, let's create a simpler approach
 
     let output = quote! {
-        stonehm::DocumentedRouter::new("API", "1.0.0")
+        machined_openapi_gen::DocumentedRouter::new("API", "1.0.0")
     };
 
     TokenStream::from(output)
@@ -779,7 +779,7 @@ fn generate_external_tagged_enum_schema(variants: &syn::punctuated::Punctuated<V
 
 /// Derive macro for automatic JSON schema generation.
 ///
-/// This derive macro automatically implements the `StonehmSchema` trait for your types,
+/// This derive macro automatically implements the `OpenApiSchema` trait for your types,
 /// enabling automatic JSON schema generation for OpenAPI specifications. Use this
 /// on all request and response types that you want to appear in your OpenAPI spec.
 ///
@@ -801,9 +801,9 @@ fn generate_external_tagged_enum_schema(variants: &syn::punctuated::Punctuated<V
 ///
 /// ```rust
 /// use serde::Serialize;
-/// use stonehm_macros::StoneSchema;
+/// use machined_openapi_gen_macros::StoneSchema;
 ///
-/// #[derive(Serialize, StonehmSchema)]
+/// #[derive(Serialize, OpenApiSchema)]
 /// struct User {
 ///     id: u32,
 ///     name: String,
@@ -820,16 +820,16 @@ fn generate_external_tagged_enum_schema(variants: &syn::punctuated::Punctuated<V
 ///
 /// ```rust
 /// # use serde::{Serialize, Deserialize};
-/// # use stonehm_macros::StonehmSchema;
+/// # use machined_openapi_gen_macros::OpenApiSchema;
 ///
-/// #[derive(Deserialize, StonehmSchema)]
+/// #[derive(Deserialize, OpenApiSchema)]
 /// struct CreateUserRequest {
 ///     name: String,
 ///     email: String,
 ///     preferences: UserPreferences,
 /// }
 ///
-/// #[derive(Serialize, StonehmSchema)]
+/// #[derive(Serialize, OpenApiSchema)]
 /// struct UserResponse {
 ///     id: u32,
 ///     name: String,
@@ -837,7 +837,7 @@ fn generate_external_tagged_enum_schema(variants: &syn::punctuated::Punctuated<V
 ///     created_at: String,
 /// }
 ///
-/// #[derive(Serialize, Deserialize, StonehmSchema)]
+/// #[derive(Serialize, Deserialize, OpenApiSchema)]
 /// struct UserPreferences {
 ///     newsletter: bool,
 ///     theme: String,
@@ -848,9 +848,9 @@ fn generate_external_tagged_enum_schema(variants: &syn::punctuated::Punctuated<V
 ///
 /// ```rust
 /// # use serde::Serialize;
-/// # use stonehm_macros::StonehmSchema;
+/// # use machined_openapi_gen_macros::OpenApiSchema;
 ///
-/// #[derive(Serialize, StonehmSchema)]
+/// #[derive(Serialize, OpenApiSchema)]
 /// enum ApiError {
 ///     UserNotFound { id: u32 },
 ///     ValidationError { field: String, message: String },
@@ -880,12 +880,12 @@ fn generate_external_tagged_enum_schema(variants: &syn::punctuated::Punctuated<V
 ///
 /// # Usage with API Handlers
 ///
-/// Use `StonehmSchema` types in your API handlers for automatic documentation:
+/// Use `OpenApiSchema` types in your API handlers for automatic documentation:
 ///
 /// ```rust,no_run
 /// # use axum::Json;
-/// # use stonehm::api_handler;
-/// # use stonehm_macros::StonehmSchema;
+/// # use machined_openapi_gen::api_handler;
+/// # use machined_openapi_gen_macros::OpenApiSchema;
 /// # use serde::{Serialize, Deserialize};
 /// # #[derive(Deserialize, StoneSchema)] struct CreateUserRequest { name: String }
 /// # #[derive(Serialize, StoneSchema)] struct User { id: u32, name: String }
@@ -908,8 +908,8 @@ fn generate_external_tagged_enum_schema(variants: &syn::punctuated::Punctuated<V
 /// - Your type must implement `Serialize` (for response types) or `Deserialize` (for request types)
 /// - The type must be used in a function signature annotated with `#[api_handler]`
 /// - For error types used in `Result<T, E>`, implement `axum::response::IntoResponse`
-#[proc_macro_derive(StonehmSchema)]
-pub fn derive_stone_schema(input: TokenStream) -> TokenStream {
+#[proc_macro_derive(OpenApiSchema)]
+pub fn derive_openapi_schema(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = &input.ident;
     let name_str = name.to_string();
@@ -1019,15 +1019,15 @@ pub fn derive_stone_schema(input: TokenStream) -> TokenStream {
     };
 
     let expanded = quote! {
-        impl stonehm::StonehmSchema for #name {
+        impl machined_openapi_gen::OpenApiSchema for #name {
             fn schema() -> String {
                 #schema_json.to_string()
             }
         }
 
         // Register this type's schema for OpenAPI components
-        stonehm::inventory::submit! {
-            stonehm::SchemaRegistration {
+        machined_openapi_gen::inventory::submit! {
+            machined_openapi_gen::SchemaRegistration {
                 type_name: #name_str,
                 schema_json: #schema_json,
             }
@@ -1046,7 +1046,7 @@ pub fn derive_stone_schema(input: TokenStream) -> TokenStream {
 /// # Basic Usage
 ///
 /// ```rust
-/// use stonehm_macros::api_error;
+/// use machined_openapi_gen_macros::api_error;
 ///
 /// #[api_error]
 /// enum ApiError {
@@ -1073,7 +1073,7 @@ pub fn derive_stone_schema(input: TokenStream) -> TokenStream {
 /// The macro automatically generates:
 /// - `IntoResponse` implementation for HTTP responses
 /// - `Serialize` implementation for JSON serialization
-/// - `StonehmSchema` implementation for OpenAPI documentation
+/// - `OpenApiSchema` implementation for OpenAPI documentation
 /// - Maps each variant to its specified status code
 /// - Uses 500 Internal Server Error for variants without doc comments
 /// - Serializes the error as JSON in the response body
@@ -1099,7 +1099,7 @@ pub fn derive_stone_schema(input: TokenStream) -> TokenStream {
 /// ## Basic Error Enum
 ///
 /// ```rust
-/// # use stonehm_macros::api_error;
+/// # use machined_openapi_gen_macros::api_error;
 /// # use serde::Serialize;
 /// #[api_error]
 /// #[derive(Serialize)]
@@ -1115,7 +1115,7 @@ pub fn derive_stone_schema(input: TokenStream) -> TokenStream {
 /// ## With Custom Serialization
 ///
 /// ```rust
-/// # use stonehm_macros::api_error;
+/// # use machined_openapi_gen_macros::api_error;
 /// # use serde::Serialize;
 /// #[api_error]
 /// #[derive(Serialize)]
@@ -1135,7 +1135,7 @@ pub fn derive_stone_schema(input: TokenStream) -> TokenStream {
 ///
 /// ```rust,no_run
 /// # use axum::Json;
-/// # use stonehm_macros::{api_error, api_handler, StoneSchema};
+/// # use machined_openapi_gen_macros::{api_error, api_handler, StoneSchema};
 /// # use serde::{Serialize, Deserialize};
 /// # #[derive(Deserialize, StoneSchema)]
 /// # struct UpdateUserRequest { name: String }
@@ -1244,8 +1244,8 @@ pub fn api_error(_attr: TokenStream, item: TokenStream) -> TokenStream {
             }
         }
 
-        // Also implement StonehmSchema for the error type
-        impl stonehm::StonehmSchema for #name {
+        // Also implement OpenApiSchema for the error type
+        impl machined_openapi_gen::OpenApiSchema for #name {
             fn schema() -> String {
                 // For error enums, generate a simple schema
                 // In a real implementation, this would analyze variants
@@ -1254,8 +1254,8 @@ pub fn api_error(_attr: TokenStream, item: TokenStream) -> TokenStream {
         }
 
         // Register this error type's schema
-        stonehm::inventory::submit! {
-            stonehm::SchemaRegistration {
+        machined_openapi_gen::inventory::submit! {
+            machined_openapi_gen::SchemaRegistration {
                 type_name: #name_str,
                 schema_json: r#"{"type":"object","properties":{"error":{"type":"object"}}}"#,
             }

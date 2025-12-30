@@ -1,10 +1,10 @@
 [package]
-name = "stonehm-macros"
+name = "machined-openapi-gen-macros"
 version = "0.1.0"
 edition = "2021"
-description = "Proc macros for stonehm - automatic OpenAPI generation"
+description = "Proc macros for machined-openapi-gen - automatic OpenAPI generation"
 license = "MIT"
-repository = "https://github.com/yourusername/stonehm"
+repository = "https://github.com/mitchell.mounts/rust-openapi-gen"
 keywords = ["openapi", "axum", "api", "documentation", "macros"]
 categories = ["web-programming", "api-bindings"]
 
