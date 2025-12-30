@@ -615,6 +615,215 @@ cargo run -p hello_world -- --test-schema | jq '.paths."/users".post'
 cargo run -p hello_world -- --test-schema | jq '.components.schemas'
 ```
 
+## Architecture Deep Dive
+
+### Compile-Time Registration System
+
+stonehm uses the [`inventory`](https://crates.io/crates/inventory) crate to implement a compile-time registration system that collects API documentation and schema information from across your entire codebase.
+
+#### How It Works
+
+**1. Registration Structs**
+
+stonehm defines two core registration types:
+
+```rust
+#[derive(Debug, Clone)]
+pub struct HandlerDocumentation {
+    pub function_name: &'static str,
+    pub summary: &'static str,
+    pub description: &'static str,
+    pub parameters: &'static str,    // JSON string: ["id (path): User ID"]
+    pub responses: &'static str,     // JSON string: ["200: Success", "404: Not found"]
+    pub request_body: &'static str,  // JSON string: ["Type: CreateUserRequest"]
+    pub tags: &'static str,          // JSON string: ["users", "admin"]
+}
+
+#[derive(Debug, Clone)]
+pub struct SchemaRegistration {
+    pub type_name: &'static str,
+    pub schema_json: &'static str,   // OpenAPI JSON schema as string
+}
+```
+
+**2. Collection Declaration**
+
+```rust
+inventory::collect!(HandlerDocumentation);
+inventory::collect!(SchemaRegistration);
+```
+
+This tells the `inventory` crate to collect all submitted instances of these types from across your compiled program.
+
+**3. Automatic Registration via Proc Macros**
+
+When you use `#[api_handler]`, the macro analyzes your function and generates:
+
+```rust
+// For a function like:
+#[api_handler]
+async fn get_user(Path(id): Path<u32>) -> Result<Json<User>, ApiError> { ... }
+
+// The macro generates:
+inventory::submit! {
+    stonehm::HandlerDocumentation {
+        function_name: "get_user",
+        summary: "Get user by ID",
+        description: "Retrieves user information using their unique identifier",
+        parameters: "[\"id (path): User ID\"]",
+        responses: "[\"200: Success\", \"400: Bad Request\", \"500: Internal Server Error\"]",
+        request_body: "[]",
+        tags: "[]",
+    }
+}
+```
+
+Similarly, `#[derive(StonehmSchema)]` generates schema registrations:
+
+```rust
+// For a struct like:
+#[derive(Serialize, StonehmSchema)]
+struct User {
+    id: u32,
+    name: String,
+    email: String,
+}
+
+// The macro generates:
+inventory::submit! {
+    stonehm::SchemaRegistration {
+        type_name: "User",
+        schema_json: r#"{"type":"object","properties":{"id":{"type":"integer"},"name":{"type":"string"},"email":{"type":"string"}},"required":["id","name","email"]}"#,
+    }
+}
+```
+
+**4. Runtime Collection and OpenAPI Generation**
+
+When your application starts and generates the OpenAPI specification:
+
+```rust
+// Collect all handler documentation
+let handler_docs: HashMap<&str, &HandlerDocumentation> = inventory::iter::<HandlerDocumentation>()
+    .map(|doc| (doc.function_name, doc))
+    .collect();
+
+// Collect all schema registrations  
+let mut schemas = HashMap::new();
+for schema_reg in inventory::iter::<SchemaRegistration>() {
+    if self.used_schemas.contains(schema_reg.type_name) {
+        schemas.insert(schema_reg.type_name.to_string(), schema_reg.schema_json.to_string());
+    }
+}
+```
+
+#### Key Constraints
+
+**Compile-Time Constants Required**: The `inventory::submit!` macro requires all fields to be compile-time constants (`&'static str`). This means:
+
+✅ **Works**: Static strings, string literals, `const` values
+```rust
+inventory::submit! {
+    SchemaRegistration {
+        type_name: "User",  // String literal
+        schema_json: USER_SCHEMA,  // const value
+    }
+}
+```
+
+❌ **Doesn't Work**: Function calls, dynamic strings, heap-allocated strings
+```rust
+inventory::submit! {
+    SchemaRegistration {
+        type_name: "User",
+        schema_json: generate_schema(),  // Function call - ERROR!
+    }
+}
+```
+
+#### Zero Runtime Overhead
+
+This system provides **zero runtime overhead** because:
+- All registration happens at compile time
+- The `inventory::iter()` calls simply iterate over a pre-built static registry
+- No heap allocations or dynamic lookups during OpenAPI generation
+- Unused schemas are automatically detected and excluded
+
+#### Schema Usage Tracking
+
+stonehm automatically tracks which schemas are actually used in your API:
+
+```rust
+// Only include schemas that are referenced in handler signatures
+let used_schemas: HashSet<String> = inventory::iter::<SchemaRegistration>()
+    .map(|reg| reg.type_name.to_string())
+    .collect();
+
+// Warn about unused schemas in development
+let registered_schemas: HashSet<String> = inventory::iter::<SchemaRegistration>()
+    .map(|reg| reg.type_name.to_string())
+    .collect();
+
+for unused in registered_schemas.difference(&used_schemas) {
+    log::warn!("Schema '{}' is registered but not used in any handlers", unused);
+}
+```
+
+### Extending stonehm
+
+#### Adding Custom Schema Types
+
+To add support for new schema types, you need to understand the compile-time constraint:
+
+```rust
+// ❌ This won't work because of dynamic generation
+fn register_dynamic_schema() {
+    let schema = generate_complex_schema(); // Dynamic
+    inventory::submit! {
+        SchemaRegistration {
+            type_name: "DynamicType",
+            schema_json: &schema,  // ERROR: not &'static str
+        }
+    }
+}
+
+// ✅ This works with static constants
+const CUSTOM_SCHEMA: &str = r#"{"type":"object","properties":{"custom":{"type":"string"}}}"#;
+
+inventory::submit! {
+    SchemaRegistration {
+        type_name: "CustomType", 
+        schema_json: CUSTOM_SCHEMA,
+    }
+}
+```
+
+#### Working with Dynamic Schemas
+
+For dynamic schema generation (like complex enum support), you have three options:
+
+1. **Generate at Compile Time**: Use proc macros to generate static strings
+2. **Embed in Router**: Handle dynamic schemas in the `ApiRouter` itself
+3. **Hybrid Approach**: Use static placeholders and runtime replacement
+
+Example hybrid approach:
+```rust
+// Register placeholder at compile time
+inventory::submit! {
+    SchemaRegistration {
+        type_name: "HttpAuthConfig",
+        schema_json: "__DYNAMIC_HTTP_AUTH_CONFIG__",  // Placeholder
+    }
+}
+
+// Replace at runtime during OpenAPI generation
+fn generate_openapi_spec(&self) -> String {
+    let mut spec = self.collect_all_schemas();
+    spec = spec.replace("__DYNAMIC_HTTP_AUTH_CONFIG__", &self.generate_http_auth_schema());
+    spec
+}
+```
+
 ## Contributing
 
 We welcome contributions! Please feel free to submit issues and pull requests.
@@ -634,6 +843,15 @@ cargo clippy -- -D warnings
 # Test all examples
 cargo test --workspace
 ```
+
+### Understanding the Codebase
+
+Key files to understand:
+- `src/lib.rs` - Core `ApiRouter` and inventory system  
+- `stonehm-macros/src/lib.rs` - `#[api_handler]` and `#[derive(StonehmSchema)]` macros
+- `examples/hello_world/` - Complete working example
+
+The inventory system is the heart of stonehm - understanding how `inventory::submit!` and `inventory::iter()` work is crucial for contributing.
 
 ## License
 

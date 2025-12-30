@@ -1,6 +1,6 @@
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, ItemFn, Attribute, Lit, Meta, Expr, Type, FnArg, ReturnType, PathArguments, GenericArgument, DeriveInput, Data, Fields};
+use syn::{parse_macro_input, ItemFn, Attribute, Lit, Meta, Expr, Type, FnArg, ReturnType, PathArguments, GenericArgument, DeriveInput, Data, Fields, Variant};
 
 /// Sanitize a type string to create a valid Rust identifier
 #[allow(dead_code)]
@@ -65,7 +65,7 @@ struct ParsedDocs {
 #[allow(dead_code)]
 fn extract_docs(attrs: &[Attribute]) -> ParsedDocs {
     let mut lines = Vec::new();
-    
+
     for attr in attrs {
         if attr.path().is_ident("doc") {
             if let Meta::NameValue(meta) = &attr.meta {
@@ -81,7 +81,7 @@ fn extract_docs(attrs: &[Attribute]) -> ParsedDocs {
             }
         }
     }
-    
+
     if lines.is_empty() {
         return ParsedDocs {
             summary: None,
@@ -91,21 +91,21 @@ fn extract_docs(attrs: &[Attribute]) -> ParsedDocs {
             responses: Vec::new(),
         };
     }
-    
+
     let mut summary = None;
     let mut description_lines = Vec::new();
     let mut parameters = Vec::new();
     let mut request_body = None;
     let mut responses = Vec::new();
     let mut current_section = "";
-    
+
     for (i, line) in lines.iter().enumerate() {
         if i == 0 {
             // First line is always the summary
             summary = Some(line.clone());
             continue;
         }
-        
+
         // Check for section headers
         if line.starts_with("# Parameters") || line.starts_with("## Parameters") {
             current_section = "parameters";
@@ -120,22 +120,22 @@ fn extract_docs(attrs: &[Attribute]) -> ParsedDocs {
             // Any other section header stops special processing
             current_section = "";
         }
-        
+
         match current_section {
             "parameters" => {
                 // Parse parameter lines like "- id (path): The user ID" or "- name (query): Filter by name"
                 if line.starts_with("- ") || line.starts_with("* ") {
                     let param_text = line[2..].trim();
-                    
+
                     // Try to parse "name (type): description" format
                     if let Some(paren_start) = param_text.find('(') {
                         if let Some(paren_end) = param_text.find(')') {
                             let name = param_text[..paren_start].trim();
                             let param_type = param_text[paren_start + 1..paren_end].trim();
-                            
+
                             if let Some(colon_pos) = param_text[paren_end..].find(':') {
                                 let description = param_text[paren_end + colon_pos + 1..].trim();
-                                
+
                                 parameters.push(ParameterDoc {
                                     name: name.to_string(),
                                     description: description.to_string(),
@@ -167,11 +167,11 @@ fn extract_docs(attrs: &[Attribute]) -> ParsedDocs {
                 // Parse response lines - both simple and elaborate formats
                 if line.starts_with("- ") || line.starts_with("* ") {
                     let response_text = line[2..].trim();
-                    
+
                     if let Some(colon_pos) = response_text.find(':') {
                         let status_part = response_text[..colon_pos].trim();
                         let after_colon = response_text[colon_pos + 1..].trim();
-                        
+
                         if let Ok(status_code) = status_part.parse::<u16>() {
                             if after_colon.is_empty() {
                                 // Elaborate format - status code with no immediate description
@@ -194,16 +194,16 @@ fn extract_docs(attrs: &[Attribute]) -> ParsedDocs {
                         }
                     }
                 } else if !responses.is_empty() && (
-                    line.starts_with("description:") || 
-                    line.starts_with("content:") || 
-                    line.starts_with("application/json:") || 
-                    line.starts_with("application/xml:") || 
-                    line.starts_with("text/plain:") || 
-                    line.starts_with("schema:") || 
-                    line.starts_with("examples:") || 
-                    line.starts_with("- name:") || 
-                    line.starts_with("name:") || 
-                    line.starts_with("summary:") || 
+                    line.starts_with("description:") ||
+                    line.starts_with("content:") ||
+                    line.starts_with("application/json:") ||
+                    line.starts_with("application/xml:") ||
+                    line.starts_with("text/plain:") ||
+                    line.starts_with("schema:") ||
+                    line.starts_with("examples:") ||
+                    line.starts_with("- name:") ||
+                    line.starts_with("name:") ||
+                    line.starts_with("summary:") ||
                     line.starts_with("value:")
                 ) {
                     // YAML-like property line - part of elaborate response format
@@ -292,13 +292,13 @@ fn extract_docs(attrs: &[Attribute]) -> ParsedDocs {
             }
         }
     }
-    
+
     let description = if !description_lines.is_empty() {
         Some(description_lines.join(" "))
     } else {
         None
     };
-    
+
     ParsedDocs {
         summary,
         description,
@@ -329,6 +329,103 @@ fn extract_request_body_type(inputs: &syn::punctuated::Punctuated<FnArg, syn::to
     None
 }
 
+/// Check if function parameters include an Authorized parameter
+/// This indicates the endpoint requires authentication
+fn has_authorized_parameter(inputs: &syn::punctuated::Punctuated<FnArg, syn::token::Comma>) -> bool {
+    for input in inputs {
+        if let FnArg::Typed(pat_type) = input {
+            if let Type::Path(type_path) = &*pat_type.ty {
+                if let Some(segment) = type_path.path.segments.last() {
+                    if segment.ident == "Authorized" {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Enhance a JSON schema with examples and defaults from field attributes
+///
+/// Supports attributes like:
+/// - `#[example = "sample_value"]`
+/// - `#[default = "default_value"]`
+/// - `#[doc = "Field description [example: value, default: value]"]`
+fn enhance_schema_with_attributes(attrs: &[Attribute], base_schema: String) -> (String, Option<String>) {
+    let mut example: Option<String> = None;
+    let mut default: Option<String> = None;
+
+    // Check for dedicated attributes first
+    for attr in attrs {
+        if attr.path().is_ident("example") {
+            if let Meta::NameValue(meta) = &attr.meta {
+                if let Expr::Lit(lit) = &meta.value {
+                    if let Lit::Str(s) = &lit.lit {
+                        example = Some(s.value());
+                    }
+                }
+            }
+        } else if attr.path().is_ident("default") {
+            if let Meta::NameValue(meta) = &attr.meta {
+                if let Expr::Lit(lit) = &meta.value {
+                    if let Lit::Str(s) = &lit.lit {
+                        default = Some(s.value());
+                    }
+                }
+            }
+        } else if attr.path().is_ident("doc") {
+            // Parse doc comments for inline metadata
+            if let Meta::NameValue(meta) = &attr.meta {
+                if let Expr::Lit(lit) = &meta.value {
+                    if let Lit::Str(s) = &lit.lit {
+                        let doc_text = s.value();
+                        // Look for [example: value, default: value] format
+                        if let Some(bracket_start) = doc_text.rfind('[') {
+                            if let Some(bracket_end) = doc_text[bracket_start..].find(']') {
+                                let metadata_str = &doc_text[bracket_start + 1..bracket_start + bracket_end];
+                                for part in metadata_str.split(',') {
+                                    let part = part.trim();
+                                    if let Some(colon_pos) = part.find(':') {
+                                        let key = part[..colon_pos].trim();
+                                        let value = part[colon_pos + 1..].trim();
+                                        match key {
+                                            "example" if example.is_none() => example = Some(value.to_string()),
+                                            "default" if default.is_none() => default = Some(value.to_string()),
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Enhance the base schema with example and default if present
+    let mut enhanced_schema = base_schema;
+
+    if let Some(example_value) = &example {
+        // Add example to the schema
+        enhanced_schema = enhanced_schema.replace(
+            "}",
+            &format!(",\"example\":\"{}\"}}", example_value.replace("\"", "\\\""))
+        );
+    }
+
+    if let Some(default_value) = &default {
+        // Add default to the schema
+        enhanced_schema = enhanced_schema.replace(
+            "}",
+            &format!(",\"default\":\"{}\"}}", default_value.replace("\"", "\\\""))
+        );
+    }
+
+    (enhanced_schema, default.clone())
+}
+
 /// Extract response and error types from function return type
 fn extract_response_and_error_types(output: &ReturnType) -> (Option<String>, Option<String>) {
     if let ReturnType::Type(_, return_type) = output {
@@ -339,7 +436,7 @@ fn extract_response_and_error_types(output: &ReturnType) -> (Option<String>, Opt
                     if let PathArguments::AngleBracketed(args) = &segment.arguments {
                         let mut response_type = None;
                         let mut error_type = None;
-                        
+
                         // First argument is success type
                         if let Some(GenericArgument::Type(Type::Path(ok_path))) = args.args.first() {
                             // Check if it's Json<T>
@@ -353,12 +450,12 @@ fn extract_response_and_error_types(output: &ReturnType) -> (Option<String>, Opt
                                 }
                             }
                         }
-                        
+
                         // Second argument is error type
                         if let Some(GenericArgument::Type(err_type)) = args.args.iter().nth(1) {
                             error_type = Some(quote!(#err_type).to_string());
                         }
-                        
+
                         return (response_type, error_type);
                     }
                 }
@@ -378,7 +475,7 @@ fn extract_response_and_error_types(output: &ReturnType) -> (Option<String>, Opt
 
 
 /// Simple api_handler attribute that works with current simplified implementation
-/// 
+///
 /// Usage:
 /// - `#[api_handler]` - No tags
 /// - `#[api_handler("tag1")]` - Single tag
@@ -387,7 +484,7 @@ fn extract_response_and_error_types(output: &ReturnType) -> (Option<String>, Opt
 pub fn api_handler(attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as ItemFn);
     let fn_name = &input.sig.ident;
-    
+
     // Parse tags from attribute arguments
     let tags: Vec<String> = if attr.is_empty() {
         Vec::new()
@@ -400,7 +497,7 @@ pub fn api_handler(attr: TokenStream, item: TokenStream) -> TokenStream {
             .filter(|s| !s.is_empty())
             .collect()
     };
-    
+
     // Extract documentation from doc comments
     let mut doc_lines = Vec::new();
     for attr in &input.attrs {
@@ -418,10 +515,10 @@ pub fn api_handler(attr: TokenStream, item: TokenStream) -> TokenStream {
             }
         }
     }
-    
+
     let fn_name_str = fn_name.to_string();
     let summary = doc_lines.first().unwrap_or(&"No summary".to_string()).clone();
-    
+
     // Extract description (everything after summary but before any # sections)
     let mut description_lines = Vec::new();
     for (i, line) in doc_lines.iter().enumerate() {
@@ -440,31 +537,46 @@ pub fn api_handler(attr: TokenStream, item: TokenStream) -> TokenStream {
     } else {
         description_lines.join(" ")
     };
-    
+
     // Simple parameter and response parsing from doc string
     let mut parameters = Vec::new();
     let mut responses = Vec::new();
     let mut request_body = Vec::new();
-    
+
     let mut current_section = "";
     for line in &doc_lines {
         if line.starts_with("# Parameters") {
             current_section = "parameters";
         } else if line.starts_with("# Responses") {
-            current_section = "responses";  
+            current_section = "responses";
         } else if line.starts_with("# Request Body") {
             current_section = "request_body";
         } else if line.starts_with("- ") && current_section == "parameters" {
-            parameters.push(line[2..].to_string());
+            let param_line = &line[2..];
+
+            // Parse the parameter line to extract name, type, and description
+            // Expected format: "name (type): description"
+            if let Some(paren_start) = param_line.find('(') {
+                if let Some(paren_end) = param_line.find(')') {
+                    if let Some(colon_pos) = param_line[paren_end..].find(':') {
+                        let name = param_line[..paren_start].trim();
+                        let param_type = param_line[paren_start + 1..paren_end].trim();
+                        let description = param_line[paren_end + colon_pos + 1..].trim();
+
+                        // Format as proper parameter documentation
+                        parameters.push(format!("{} ({}): {}", name, param_type, description));
+                    }
+                }
+            }
         } else if line.starts_with("- ") && current_section == "responses" {
             let response_line = line[2..].to_string();
-            
+
             // Handle both simple format "- 200: Success" and complex format "- 404:"
             if response_line.contains(":") {
                 if let Some(colon_pos) = response_line.find(':') {
                     let status_part = response_line[..colon_pos].trim();
                     let desc_part = response_line[colon_pos + 1..].trim();
-                    
+
                     if status_part.chars().all(|c| c.is_ascii_digit()) && status_part.len() == 3 {
                         if desc_part.is_empty() {
                             // Complex format - will collect description from following lines
@@ -498,26 +610,55 @@ pub fn api_handler(attr: TokenStream, item: TokenStream) -> TokenStream {
             request_body.push(line.clone());
         }
     }
-    
+
     // Extract type information from function signature
     let request_body_type = extract_request_body_type(&input.sig.inputs);
-    let (_response_type, _error_type) = extract_response_and_error_types(&input.sig.output);
-    
+    let (_response_type, error_type) = extract_response_and_error_types(&input.sig.output);
+    let requires_auth = has_authorized_parameter(&input.sig.inputs);
+
     // Include type information in the request body documentation
     let mut enhanced_request_body = request_body.clone();
     if let Some(ref req_type) = request_body_type {
         // Add the type name to the beginning of the request body documentation
         enhanced_request_body.insert(0, format!("Type: {req_type}"));
     }
-    
-    let parameters_json = format!("[{}]", parameters.iter().map(|p| format!("\"{}\"", p.replace("\"", "\\\""))).collect::<Vec<_>>().join(","));
-    let responses_json = format!("[{}]", responses.iter().map(|r| format!("\"{}\"", r.replace("\"", "\\\""))).collect::<Vec<_>>().join(","));
+
+    // Don't add authentication header parameter anymore - it will be handled by securitySchemes
+    // Instead, add a special marker that the OpenAPI generator can detect
+    let mut enhanced_parameters = parameters.clone();
+    if requires_auth {
+        enhanced_parameters.insert(0, "__REQUIRES_AUTH__".to_string());
+    }
+
+    // Enhance responses with error type information and add standard errors if needed
+    let mut enhanced_responses = responses.clone();
+    if requires_auth {
+        // Add 401 Unauthorized if not already present and no existing 401 responses
+        let has_401 = enhanced_responses.iter().any(|r| r.starts_with("401"));
+        if !has_401 {
+            enhanced_responses.push("401: Authentication token required or invalid".to_string());
+        }
+    }
+
+    // Always add 500 Internal Server Error if not already present
+    let has_500 = enhanced_responses.iter().any(|r| r.starts_with("500"));
+    if !has_500 {
+        enhanced_responses.push("500: Internal server error occurred".to_string());
+    }
+
+    if let Some(ref err_type) = error_type {
+        // Add error type information to the responses
+        enhanced_responses.push(format!("ErrorType: {err_type}"));
+    }
+
+    let parameters_json = format!("[{}]", enhanced_parameters.iter().map(|p| format!("\"{}\"", p.replace("\"", "\\\""))).collect::<Vec<_>>().join(","));
+    let responses_json = format!("[{}]", enhanced_responses.iter().map(|r| format!("\"{}\"", r.replace("\"", "\\\""))).collect::<Vec<_>>().join(","));
     let request_body_json = format!("[{}]", enhanced_request_body.iter().map(|rb| format!("\"{}\"", rb.replace("\"", "\\\""))).collect::<Vec<_>>().join(","));
     let tags_json = format!("[{}]", tags.iter().map(|t| format!("\"{}\"", t.replace("\"", "\\\""))).collect::<Vec<_>>().join(","));
-    
+
     let output = quote! {
         #input
-        
+
         // Register handler documentation at compile time
         stonehm::inventory::submit! {
             stonehm::HandlerDocumentation {
@@ -531,7 +672,7 @@ pub fn api_handler(attr: TokenStream, item: TokenStream) -> TokenStream {
             }
         }
     };
-    
+
     TokenStream::from(output)
 }
 
@@ -540,22 +681,110 @@ pub fn api_handler(attr: TokenStream, item: TokenStream) -> TokenStream {
 pub fn documented_router(_input: TokenStream) -> TokenStream {
     // This macro will need to parse the router definition and extract handler docs
     // For now, let's create a simpler approach
-    
+
     let output = quote! {
         stonehm::DocumentedRouter::new("API", "1.0.0")
     };
-    
+
     TokenStream::from(output)
 }
 
+/// Generate schema for enum variants with external tagging
+fn generate_external_tagged_enum_schema(variants: &syn::punctuated::Punctuated<Variant, syn::token::Comma>) -> String {
+    let mut one_of_schemas = Vec::new();
+
+    for variant in variants {
+        let variant_name = variant.ident.to_string();
+
+        let variant_schema = match &variant.fields {
+            Fields::Unit => {
+                // Unit variant like `Success` -> {"Success": null}
+                format!(
+                    "{{\"type\":\"object\",\"required\":[\"{}\"],\"properties\":{{\"{}\":{{\"type\":\"null\"}}}}}}",
+                    variant_name, variant_name
+                )
+            }
+            Fields::Unnamed(fields) => {
+                if fields.unnamed.len() == 1 {
+                    // Single field variant like `KafkaSource(KafkaSourceConfig)` -> {"KafkaSource": {...}}
+                    if let Type::Path(type_path) = &fields.unnamed.first().unwrap().ty {
+                        if let Some(segment) = type_path.path.segments.last() {
+                            let inner_type = segment.ident.to_string();
+
+                            // Use comprehensive type mapping for enum variants
+                            let schema_ref = match inner_type.as_str() {
+                                // Basic primitive types
+                                "String" | "str" => "{\"type\":\"string\"}".to_string(),
+                                "i8" | "i16" | "i32" | "i64" | "i128" | "isize" => "{\"type\":\"integer\"}".to_string(),
+                                "u8" | "u16" | "u32" | "u64" | "u128" | "usize" => "{\"type\":\"integer\"}".to_string(),
+                                "f32" | "f64" => "{\"type\":\"number\"}".to_string(),
+                                "bool" => "{\"type\":\"boolean\"}".to_string(),
+
+                                // Standard library collection types
+                                "Vec" => "{\"type\":\"array\"}".to_string(),
+                                "HashMap" | "BTreeMap" => "{\"type\":\"object\"}".to_string(),
+                                "HashSet" | "BTreeSet" => "{\"type\":\"array\"}".to_string(),
+
+                                // Common types that should be strings
+                                "Uuid" => "{\"type\":\"string\",\"format\":\"uuid\"}".to_string(),
+                                "DateTime" | "NaiveDateTime" | "NaiveDate" | "NaiveTime" => "{\"type\":\"string\",\"format\":\"date-time\"}".to_string(),
+                                "Url" => "{\"type\":\"string\",\"format\":\"uri\"}".to_string(),
+
+                                // Wrappers
+                                "Option" => "{\"type\":\"string\"}".to_string(), // Simplified
+                                "Result" => "{\"type\":\"object\"}".to_string(), // Simplified
+
+                                _ => format!("{{\"$ref\":\"#/components/schemas/{}\"}}", inner_type),
+                            };
+
+                            format!(
+                                "{{\"type\":\"object\",\"required\":[\"{}\"],\"properties\":{{\"{}\":{}}}}}",
+                                variant_name, variant_name, schema_ref
+                            )
+                        } else {
+                            format!(
+                                "{{\"type\":\"object\",\"required\":[\"{}\"],\"properties\":{{\"{}\":{{\"type\":\"object\"}}}}}}",
+                                variant_name, variant_name
+                            )
+                        }
+                    } else {
+                        format!(
+                            "{{\"type\":\"object\",\"required\":[\"{}\"],\"properties\":{{\"{}\":{{\"type\":\"object\"}}}}}}",
+                            variant_name, variant_name
+                        )
+                    }
+                } else {
+                    // Multiple unnamed fields - tuple-like
+                    format!(
+                        "{{\"type\":\"object\",\"required\":[\"{}\"],\"properties\":{{\"{}\":{{\"type\":\"array\"}}}}}}",
+                        variant_name, variant_name
+                    )
+                }
+            }
+            Fields::Named(_) => {
+                // Named fields - inline object
+                // For now, reference a schema named after the variant
+                format!(
+                    "{{\"type\":\"object\",\"required\":[\"{}\"],\"properties\":{{\"{}\":{{\"$ref\":\"#/components/schemas/{}Fields\"}}}}}}",
+                    variant_name, variant_name, variant_name
+                )
+            }
+        };
+
+        one_of_schemas.push(variant_schema);
+    }
+
+    format!("{{\"oneOf\":[{}]}}", one_of_schemas.join(","))
+}
+
 /// Derive macro for automatic JSON schema generation.
-/// 
+///
 /// This derive macro automatically implements the `StonehmSchema` trait for your types,
 /// enabling automatic JSON schema generation for OpenAPI specifications. Use this
 /// on all request and response types that you want to appear in your OpenAPI spec.
-/// 
+///
 /// # Type Support
-/// 
+///
 /// Supported Rust types and their JSON schema mappings:
 /// - `String`, `&str` → `"string"`
 /// - `i32`, `i64`, `u32`, `u64`, etc. → `"integer"`
@@ -565,15 +794,15 @@ pub fn documented_router(_input: TokenStream) -> TokenStream {
 /// - `Vec<T>` → `"array"` with item schema
 /// - Nested structs → object references
 /// - Enums → `"string"` (basic support)
-/// 
+///
 /// # Examples
-/// 
+///
 /// ## Basic Struct
-/// 
+///
 /// ```rust
 /// use serde::Serialize;
 /// use stonehm_macros::StoneSchema;
-/// 
+///
 /// #[derive(Serialize, StonehmSchema)]
 /// struct User {
 ///     id: u32,
@@ -582,24 +811,24 @@ pub fn documented_router(_input: TokenStream) -> TokenStream {
 ///     is_active: bool,
 ///     age: Option<u32>,
 /// }
-/// 
+///
 /// // Generates JSON schema automatically
 /// let schema = User::schema();
 /// ```
-/// 
+///
 /// ## Request/Response Types
-/// 
+///
 /// ```rust
 /// # use serde::{Serialize, Deserialize};
 /// # use stonehm_macros::StonehmSchema;
-/// 
+///
 /// #[derive(Deserialize, StonehmSchema)]
 /// struct CreateUserRequest {
 ///     name: String,
 ///     email: String,
 ///     preferences: UserPreferences,
 /// }
-/// 
+///
 /// #[derive(Serialize, StonehmSchema)]
 /// struct UserResponse {
 ///     id: u32,
@@ -607,20 +836,20 @@ pub fn documented_router(_input: TokenStream) -> TokenStream {
 ///     email: String,
 ///     created_at: String,
 /// }
-/// 
+///
 /// #[derive(Serialize, Deserialize, StonehmSchema)]
 /// struct UserPreferences {
 ///     newsletter: bool,
 ///     theme: String,
 /// }
 /// ```
-/// 
+///
 /// ## Error Types
-/// 
+///
 /// ```rust
 /// # use serde::Serialize;
 /// # use stonehm_macros::StonehmSchema;
-/// 
+///
 /// #[derive(Serialize, StonehmSchema)]
 /// enum ApiError {
 ///     UserNotFound { id: u32 },
@@ -629,11 +858,11 @@ pub fn documented_router(_input: TokenStream) -> TokenStream {
 ///     NetworkTimeout,
 /// }
 /// ```
-/// 
+///
 /// # Generated Schema Format
-/// 
+///
 /// The macro generates JSON schemas following the OpenAPI 3.0 specification:
-/// 
+///
 /// ```json
 /// {
 ///   "title": "User",
@@ -648,11 +877,11 @@ pub fn documented_router(_input: TokenStream) -> TokenStream {
 ///   "required": ["id", "name", "email", "is_active"]
 /// }
 /// ```
-/// 
+///
 /// # Usage with API Handlers
-/// 
+///
 /// Use `StonehmSchema` types in your API handlers for automatic documentation:
-/// 
+///
 /// ```rust,no_run
 /// # use axum::Json;
 /// # use stonehm::api_handler;
@@ -663,7 +892,7 @@ pub fn documented_router(_input: TokenStream) -> TokenStream {
 /// # #[derive(Serialize, StoneSchema)] enum ApiError { NotFound }
 /// # use axum::response::IntoResponse;
 /// # impl IntoResponse for ApiError { fn into_response(self) -> axum::response::Response { todo!() } }
-/// 
+///
 /// /// Create a new user
 /// #[api_handler]
 /// async fn create_user(
@@ -673,9 +902,9 @@ pub fn documented_router(_input: TokenStream) -> TokenStream {
 /// #   Ok(Json(User { id: 1, name: request.name }))
 /// }
 /// ```
-/// 
+///
 /// # Requirements
-/// 
+///
 /// - Your type must implement `Serialize` (for response types) or `Deserialize` (for request types)
 /// - The type must be used in a function signature annotated with `#[api_handler]`
 /// - For error types used in `Result<T, E>`, implement `axum::response::IntoResponse`
@@ -684,63 +913,95 @@ pub fn derive_stone_schema(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = &input.ident;
     let name_str = name.to_string();
-    
-    // Generate a simple JSON schema string
+
+    // Generate JSON schema based on the data type
     let schema_json = match &input.data {
         Data::Struct(data_struct) => {
             match &data_struct.fields {
                 Fields::Named(fields) => {
                     let mut properties = Vec::new();
                     let mut required = Vec::new();
-                    
+
                     for field in fields.named.iter() {
                         if let Some(field_name) = &field.ident {
                             let field_name_str = field_name.to_string();
-                            
-                            // Simple type mapping - extend as needed
-                            let type_str = match &field.ty {
+
+                            // Enhanced type mapping with schema references for custom types
+                            let (type_schema, _is_custom_type) = match &field.ty {
                                 Type::Path(type_path) => {
                                     if let Some(segment) = type_path.path.segments.last() {
-                                        match segment.ident.to_string().as_str() {
-                                            "String" | "str" => "string",
-                                            "i32" | "i64" | "u32" | "u64" | "isize" | "usize" => "integer",
-                                            "f32" | "f64" => "number",
-                                            "bool" => "boolean",
+                                        let type_name = segment.ident.to_string();
+                                        match type_name.as_str() {
+                                            // Basic primitive types
+                                            "String" | "str" => ("{\"type\":\"string\"}".to_string(), false),
+                                            "i8" | "i16" | "i32" | "i64" | "i128" | "isize" => ("{\"type\":\"integer\"}".to_string(), false),
+                                            "u8" | "u16" | "u32" | "u64" | "u128" | "usize" => ("{\"type\":\"integer\"}".to_string(), false),
+                                            "f32" | "f64" => ("{\"type\":\"number\"}".to_string(), false),
+                                            "bool" => ("{\"type\":\"boolean\"}".to_string(), false),
+
+                                            // Standard library collection types
+                                            "Vec" => ("{\"type\":\"array\"}".to_string(), false),
+                                            "HashMap" | "BTreeMap" => ("{\"type\":\"object\"}".to_string(), false),
+                                            "HashSet" | "BTreeSet" => ("{\"type\":\"array\"}".to_string(), false),
+
+                                            // Common types that should be strings
+                                            "Uuid" => ("{\"type\":\"string\",\"format\":\"uuid\"}".to_string(), false),
+                                            "DateTime" | "NaiveDateTime" | "NaiveDate" | "NaiveTime" => ("{\"type\":\"string\",\"format\":\"date-time\"}".to_string(), false),
+                                            "Url" => ("{\"type\":\"string\",\"format\":\"uri\"}".to_string(), false),
+
+                                            // Option wrapper - simplified handling
                                             "Option" => {
-                                                // Skip required for Option types
-                                                "string" // simplified - extract inner type later
+                                                // For Option<T>, we need to parse the generic parameter
+                                                // For now, default to string but this could be enhanced
+                                                ("{\"type\":\"string\"}".to_string(), false)
                                             },
-                                            _ => "object", // custom types
+
+                                            // Result wrapper - treat as the success type for now
+                                            "Result" => {
+                                                ("{\"type\":\"object\"}".to_string(), false)
+                                            },
+
+                                            _ => {
+                                                // Custom types - create schema reference
+                                                (format!("{{\"$ref\":\"#/components/schemas/{}\"}}", type_name), true)
+                                            }
                                         }
                                     } else {
-                                        "string"
+                                        ("{\"type\":\"string\"}".to_string(), false)
                                     }
                                 },
-                                _ => "string", // default for complex types
+                                _ => ("{\"type\":\"string\"}".to_string(), false), // default for complex types
                             };
-                            
-                            properties.push(format!("\"{field_name_str}\":{{\"type\":\"{type_str}\"}}"));
-                            
-                            // Only add to required if not an Option type
-                            if let Type::Path(type_path) = &field.ty {
-                                if let Some(segment) = type_path.path.segments.last() {
-                                    if segment.ident != "Option" {
-                                        required.push(format!("\"{field_name_str}\""));
+
+                            // Parse field attributes for examples and defaults
+                            let (enhanced_schema, default_value) = enhance_schema_with_attributes(&field.attrs, type_schema);
+                            properties.push(format!("\"{field_name_str}\":{}", enhanced_schema));
+
+                            // If there's a default value, this field is not required
+                            let has_default = default_value.is_some();
+
+                            // Only add to required if not an Option type and has no default value
+                            if !has_default {
+                                if let Type::Path(type_path) = &field.ty {
+                                    if let Some(segment) = type_path.path.segments.last() {
+                                        if segment.ident != "Option" {
+                                            required.push(format!("\"{field_name_str}\""));
+                                        }
                                     }
+                                } else {
+                                    required.push(format!("\"{field_name_str}\""));
                                 }
-                            } else {
-                                required.push(format!("\"{field_name_str}\""));
                             }
                         }
                     }
-                    
+
                     let properties_str = properties.join(",");
                     let required_str = if required.is_empty() {
                         String::new()
                     } else {
                         format!(",\"required\":[{}]", required.join(","))
                     };
-                    
+
                     format!("{{\"type\":\"object\",\"properties\":{{{properties_str}}}{required_str}}}")
                 },
                 _ => {
@@ -748,18 +1009,22 @@ pub fn derive_stone_schema(input: TokenStream) -> TokenStream {
                 }
             }
         },
+        Data::Enum(data_enum) => {
+            // Generate oneOf schema for enums with external tagging
+            generate_external_tagged_enum_schema(&data_enum.variants)
+        },
         _ => {
             "{\"type\":\"string\"}".to_string()
         }
     };
-    
+
     let expanded = quote! {
         impl stonehm::StonehmSchema for #name {
             fn schema() -> String {
                 #schema_json.to_string()
             }
         }
-        
+
         // Register this type's schema for OpenAPI components
         stonehm::inventory::submit! {
             stonehm::SchemaRegistration {
@@ -768,56 +1033,56 @@ pub fn derive_stone_schema(input: TokenStream) -> TokenStream {
             }
         }
     };
-    
+
     TokenStream::from(expanded)
 }
 
 /// Attribute macro for automatically generating HTTP error responses.
-/// 
+///
 /// This macro automatically implements `axum::response::IntoResponse` for error enums,
 /// mapping each variant to an appropriate HTTP status code. Use doc comments with
 /// `/// {code}: {description}` format to specify status codes for variants.
-/// 
+///
 /// # Basic Usage
-/// 
+///
 /// ```rust
 /// use stonehm_macros::api_error;
-/// 
+///
 /// #[api_error]
 /// enum ApiError {
 ///     /// 404: User not found
 ///     UserNotFound { id: u32 },
-///     
+///
 ///     /// 400: Invalid input provided
 ///     InvalidInput { message: String },
-///     
+///
 ///     /// 401: Authentication required
 ///     Unauthorized,
-///     
+///
 ///     /// 403: Access forbidden
 ///     Forbidden,
-///     
+///
 ///     // Variants without doc comments default to 500 Internal Server Error
 ///     DatabaseError,
 ///     NetworkTimeout,
 /// }
 /// ```
-/// 
+///
 /// # Generated Implementation
-/// 
+///
 /// The macro automatically generates:
 /// - `IntoResponse` implementation for HTTP responses
-/// - `Serialize` implementation for JSON serialization  
+/// - `Serialize` implementation for JSON serialization
 /// - `StonehmSchema` implementation for OpenAPI documentation
 /// - Maps each variant to its specified status code
 /// - Uses 500 Internal Server Error for variants without doc comments
 /// - Serializes the error as JSON in the response body
-/// 
+///
 /// # Supported Status Codes
-/// 
+///
 /// Common HTTP status codes you can use:
 /// - 200 OK
-/// - 201 Created  
+/// - 201 Created
 /// - 204 No Content
 /// - 400 Bad Request
 /// - 401 Unauthorized
@@ -828,11 +1093,11 @@ pub fn derive_stone_schema(input: TokenStream) -> TokenStream {
 /// - 500 Internal Server Error
 /// - 502 Bad Gateway
 /// - 503 Service Unavailable
-/// 
+///
 /// # Examples
-/// 
+///
 /// ## Basic Error Enum
-/// 
+///
 /// ```rust
 /// # use stonehm_macros::api_error;
 /// # use serde::Serialize;
@@ -841,14 +1106,14 @@ pub fn derive_stone_schema(input: TokenStream) -> TokenStream {
 /// enum UserError {
 ///     /// 404: User not found
 ///     NotFound { id: u32 },
-///     
+///
 ///     /// 400: Invalid user data
 ///     InvalidData { field: String, reason: String },
 /// }
 /// ```
-/// 
+///
 /// ## With Custom Serialization
-/// 
+///
 /// ```rust
 /// # use stonehm_macros::api_error;
 /// # use serde::Serialize;
@@ -859,15 +1124,15 @@ pub fn derive_stone_schema(input: TokenStream) -> TokenStream {
 ///     /// 401: Missing or invalid authentication token
 ///     #[serde(rename = "auth_required")]
 ///     AuthRequired,
-///     
+///
 ///     /// 403: User lacks required permissions
 ///     #[serde(rename = "access_denied")]
 ///     AccessDenied { required_role: String },
 /// }
 /// ```
-/// 
+///
 /// ## Usage in Handlers
-/// 
+///
 /// ```rust,no_run
 /// # use axum::Json;
 /// # use stonehm_macros::{api_error, api_handler, StoneSchema};
@@ -884,7 +1149,7 @@ pub fn derive_stone_schema(input: TokenStream) -> TokenStream {
 /// #     /// 400: Invalid data
 /// #     InvalidData { message: String },
 /// # }
-/// 
+///
 /// /// Update user information
 /// #[api_handler]
 /// async fn update_user(
@@ -894,19 +1159,19 @@ pub fn derive_stone_schema(input: TokenStream) -> TokenStream {
 ///     if id == 0 {
 ///         return Err(UserError::NotFound { id });
 ///     }
-///     
+///
 ///     if data.name.is_empty() {
-///         return Err(UserError::InvalidData { 
-///             message: "Name cannot be empty".to_string() 
+///         return Err(UserError::InvalidData {
+///             message: "Name cannot be empty".to_string()
 ///         });
 ///     }
-///     
+///
 ///     Ok(Json(User { id, name: data.name }))
 /// }
 /// ```
-/// 
+///
 /// # Requirements
-/// 
+///
 /// - The error enum must also have `#[derive(Serialize)]` or implement `Serialize` manually
 /// - Each variant's doc comment should start with a 3-digit HTTP status code followed by a colon
 /// - The macro will automatically implement `axum::response::IntoResponse`
@@ -916,15 +1181,15 @@ pub fn api_error(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as DeriveInput);
     let name = &input.ident;
     let name_str = name.to_string();
-    
+
     // Extract status codes from doc comments
     let mut variant_status_codes = Vec::new();
-    
+
     if let Data::Enum(data_enum) = &input.data {
         for variant in &data_enum.variants {
             let variant_name = &variant.ident;
             let mut status_code = 500u16; // Default to 500 Internal Server Error
-            
+
             // Look for status code in doc comments
             for attr in &variant.attrs {
                 if attr.path().is_ident("doc") {
@@ -945,40 +1210,40 @@ pub fn api_error(_attr: TokenStream, item: TokenStream) -> TokenStream {
                     }
                 }
             }
-            
+
             variant_status_codes.push((variant_name.clone(), status_code));
         }
     }
-    
+
     // Generate match arms for IntoResponse implementation
     let match_arms = variant_status_codes.iter().map(|(variant_name, status_code)| {
         quote! {
             Self::#variant_name { .. } => #status_code
         }
     });
-    
+
     // Generate the implementation
     let expanded = quote! {
         #input
-        
+
         impl axum::response::IntoResponse for #name {
             fn into_response(self) -> axum::response::Response {
                 use axum::http::StatusCode;
-                
+
                 let status = match &self {
                     #(#match_arms),*
                 };
-                
+
                 let body = axum::Json(serde_json::json!({
                     "error": serde_json::to_value(&self).unwrap_or_else(|_| serde_json::json!({
                         "message": "Failed to serialize error"
                     }))
                 }));
-                
+
                 (StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR), body).into_response()
             }
         }
-        
+
         // Also implement StonehmSchema for the error type
         impl stonehm::StonehmSchema for #name {
             fn schema() -> String {
@@ -987,7 +1252,7 @@ pub fn api_error(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 format!(r#"{{"type":"object","properties":{{"error":{{"type":"object"}}}}}}"#)
             }
         }
-        
+
         // Register this error type's schema
         stonehm::inventory::submit! {
             stonehm::SchemaRegistration {
@@ -996,7 +1261,7 @@ pub fn api_error(_attr: TokenStream, item: TokenStream) -> TokenStream {
             }
         }
     };
-    
+
     TokenStream::from(expanded)
 }
 
@@ -1005,72 +1270,72 @@ mod tests {
     use super::*;
     use quote::quote;
     use syn::parse_quote;
-    
+
     #[test]
     fn test_extract_request_body_type() {
         // Test Json<T> extraction
         let inputs: syn::punctuated::Punctuated<FnArg, syn::token::Comma> = parse_quote! {
             Json(body): Json<CreateUserRequest>
         };
-        
+
         let result = extract_request_body_type(&inputs);
         assert_eq!(result, Some("CreateUserRequest".to_string()));
-        
+
         // Test with multiple parameters
         let inputs: syn::punctuated::Punctuated<FnArg, syn::token::Comma> = parse_quote! {
             Path(id): Path<u32>,
             Json(data): Json<UpdateRequest>
         };
-        
+
         let result = extract_request_body_type(&inputs);
         assert_eq!(result, Some("UpdateRequest".to_string()));
-        
+
         // Test without Json parameter
         let inputs: syn::punctuated::Punctuated<FnArg, syn::token::Comma> = parse_quote! {
             Path(id): Path<u32>
         };
-        
+
         let result = extract_request_body_type(&inputs);
         assert_eq!(result, None);
     }
-    
+
     #[test]
     fn test_extract_response_and_error_types() {
         // Test Result<Json<T>, E>
         let output: ReturnType = parse_quote! {
             -> Result<Json<UserResponse>, ApiError>
         };
-        
+
         let (response_type, error_type) = extract_response_and_error_types(&output);
         assert_eq!(response_type, Some("UserResponse".to_string()));
         assert_eq!(error_type, Some("ApiError".to_string()));
-        
+
         // Test Json<T> without Result
         let output: ReturnType = parse_quote! {
             -> Json<HealthResponse>
         };
-        
+
         let (response_type, error_type) = extract_response_and_error_types(&output);
         assert_eq!(response_type, Some("HealthResponse".to_string()));
         assert_eq!(error_type, None);
-        
+
         // Test Result with tuple success type
         let output: ReturnType = parse_quote! {
             -> Result<(StatusCode, Json<CreatedResponse>), CreateError>
         };
-        
+
         let (response_type, error_type) = extract_response_and_error_types(&output);
         assert_eq!(response_type, None); // Current implementation doesn't handle tuples
         assert_eq!(error_type, Some("CreateError".to_string()));
-        
+
         // Test no return type
         let output: ReturnType = ReturnType::Default;
-        
+
         let (response_type, error_type) = extract_response_and_error_types(&output);
         assert_eq!(response_type, None);
         assert_eq!(error_type, None);
     }
-    
+
     #[test]
     fn test_sanitize_type_for_identifier() {
         assert_eq!(sanitize_type_for_identifier("Vec<String>"), "Vec_String_");
@@ -1080,7 +1345,7 @@ mod tests {
         assert_eq!(sanitize_type_for_identifier("&str"), "_str");
         assert_eq!(sanitize_type_for_identifier("*const u8"), "_const_u8");
     }
-    
+
     #[test]
     fn test_extract_docs_simple() {
         let attrs = vec![
@@ -1088,12 +1353,12 @@ mod tests {
             parse_quote!(#[doc = " "]),
             parse_quote!(#[doc = " This is a simple test handler"]),
         ];
-        
+
         let docs = extract_docs(&attrs);
         assert_eq!(docs.summary, Some("Simple handler".to_string()));
         assert_eq!(docs.description, Some("This is a simple test handler".to_string()));
     }
-    
+
     #[test]
     fn test_extract_docs_with_parameters() {
         let attrs = vec![
@@ -1105,7 +1370,7 @@ mod tests {
             parse_quote!(#[doc = " - id (path): User ID"]),
             parse_quote!(#[doc = " - include_deleted (query): Include deleted users"]),
         ];
-        
+
         let docs = extract_docs(&attrs);
         assert_eq!(docs.summary, Some("Get user by ID".to_string()));
         assert_eq!(docs.parameters.len(), 2);
@@ -1114,7 +1379,7 @@ mod tests {
         assert_eq!(docs.parameters[1].name, "include_deleted");
         assert_eq!(docs.parameters[1].param_type, "query");
     }
-    
+
     #[test]
     fn test_extract_docs_with_request_body() {
         let attrs = vec![
@@ -1126,15 +1391,15 @@ mod tests {
             parse_quote!(#[doc = " - name (string): Full name"]),
             parse_quote!(#[doc = " - email (string): Email address"]),
         ];
-        
+
         let docs = extract_docs(&attrs);
         assert!(docs.request_body.is_some());
-        
+
         let body = docs.request_body.unwrap();
         assert_eq!(body.content_type, "application/json");
         assert_eq!(body.description, "User data for creation - name (string): Full name - email (string): Email address");
     }
-    
+
     #[test]
     fn test_extract_docs_with_responses() {
         let attrs = vec![
@@ -1145,20 +1410,20 @@ mod tests {
             parse_quote!(#[doc = " - 404: User not found"]),
             parse_quote!(#[doc = " - 403: Access denied"]),
         ];
-        
+
         let docs = extract_docs(&attrs);
         assert_eq!(docs.responses.len(), 3);
-        
+
         assert_eq!(docs.responses[0].status_code, 204);
         assert_eq!(docs.responses[0].description, "User deleted");
-        
+
         assert_eq!(docs.responses[1].status_code, 404);
         assert_eq!(docs.responses[1].description, "User not found");
-        
+
         assert_eq!(docs.responses[2].status_code, 403);
         assert_eq!(docs.responses[2].description, "Access denied");
     }
-    
+
     #[test]
     fn test_extract_docs_complex_responses() {
         let attrs = vec![
@@ -1173,24 +1438,24 @@ mod tests {
             parse_quote!(#[doc = " - 404:"]),
             parse_quote!(#[doc = "   description: Not found"]),
         ];
-        
+
         let docs = extract_docs(&attrs);
         assert_eq!(docs.responses.len(), 2);
-        
+
         let resp200 = &docs.responses[0];
         assert_eq!(resp200.status_code, 200);
         assert_eq!(resp200.description, "Success");
         assert!(resp200.content.is_some());
-        
+
         let content = resp200.content.as_ref().unwrap();
         assert_eq!(content.media_type, "application/json");
         assert_eq!(content.schema, Some("UserResponse".to_string()));
-        
+
         let resp404 = &docs.responses[1];
         assert_eq!(resp404.status_code, 404);
         assert_eq!(resp404.description, "Not found");
     }
-    
+
     #[test]
     fn test_extract_docs_with_examples() {
         let attrs = vec![
@@ -1204,27 +1469,27 @@ mod tests {
             parse_quote!(#[doc = "       summary: Successful response"]),
             parse_quote!(#[doc = r#"       value: {"status": "ok"}"#]),
         ];
-        
+
         let docs = extract_docs(&attrs);
         assert_eq!(docs.responses.len(), 1);
-        
+
         let resp = &docs.responses[0];
         assert!(resp.examples.is_some());
-        
+
         let examples = resp.examples.as_ref().unwrap();
         assert_eq!(examples.len(), 1);
-        
+
         let example = &examples[0];
         assert_eq!(example.name, "success_example");
         assert_eq!(example.summary, Some("Successful response".to_string()));
         assert_eq!(example.value, r#"{"status": "ok"}"#);
     }
-    
+
     #[test]
     fn test_extract_docs_empty() {
         let attrs = vec![];
         let docs = extract_docs(&attrs);
-        
+
         assert_eq!(docs.summary, None);
         assert_eq!(docs.description, None);
         assert!(docs.parameters.is_empty());

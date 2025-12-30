@@ -13,7 +13,7 @@ categories = ["web-programming", "api-bindings"]
 members = ["examples/hello_world", "stonehm-macros"]
 
 [dependencies]
-axum = { version = "0.7", default-features = false, features = ["json"] }
+axum = { version = "0.8.1", default-features = false, features = ["json", "query"] }
 tower = "0.5"
 tower-service = "0.3"
 http = "1.0"
