@@ -308,7 +308,48 @@ fn extract_docs(attrs: &[Attribute]) -> ParsedDocs {
     }
 }
 
-/// Extract request body type from function parameters
+/// Extract the request body type from function parameters.
+///
+/// This function scans through the function's parameter list looking for an Axum `Json<T>` extractor,
+/// which indicates the function accepts a JSON request body. When found, it extracts the inner type `T`
+/// and returns it as a string for use in OpenAPI documentation generation.
+///
+/// # How It Works
+///
+/// The function iterates through each parameter, looking for the pattern `Json<SomeType>`.
+/// When it finds a `Json` wrapper, it extracts the inner type and converts it to a string
+/// representation using the `quote!` macro.
+///
+/// # Examples
+///
+/// ```ignore
+/// // For this handler:
+/// async fn create_user(Json(request): Json<CreateUserRequest>) -> Result<Json<User>, ApiError>
+///
+/// // Returns: Some("CreateUserRequest")
+/// ```
+///
+/// ```ignore
+/// // For this handler without a JSON body:
+/// async fn get_user(Path(id): Path<u32>) -> Result<Json<User>, ApiError>
+///
+/// // Returns: None
+/// ```
+///
+/// ```ignore
+/// // For this handler with multiple parameters:
+/// async fn update_user(
+///     Path(id): Path<u32>,
+///     Json(request): Json<UpdateUserRequest>
+/// ) -> Result<Json<User>, ApiError>
+///
+/// // Returns: Some("UpdateUserRequest")
+/// ```
+///
+/// # Returns
+///
+/// - `Some(String)` containing the type name if a `Json<T>` parameter is found
+/// - `None` if no JSON request body parameter exists
 fn extract_request_body_type(inputs: &syn::punctuated::Punctuated<FnArg, syn::token::Comma>) -> Option<String> {
     for input in inputs {
         if let FnArg::Typed(pat_type) = input {
@@ -426,7 +467,66 @@ fn enhance_schema_with_attributes(attrs: &[Attribute], base_schema: String) -> (
     (enhanced_schema, default.clone())
 }
 
-/// Extract response and error types from function return type
+/// Extract the response and error types from a function's return type.
+///
+/// This function analyzes the return type of a handler function to determine:
+/// 1. The success response type (typically wrapped in `Json<T>`)
+/// 2. The error type (from `Result<_, E>`)
+///
+/// These types are used to automatically generate accurate OpenAPI schema references
+/// in the documentation. The error type serves as a default that can be overridden
+/// by explicitly mentioning error types in response documentation comments.
+///
+/// # How It Works
+///
+/// The function handles several common Axum return type patterns:
+/// - `Result<Json<T>, E>` - Extracts both `T` (success) and `E` (error)
+/// - `Result<(StatusCode, Json<T>), E>` - Extracts `T` and `E` (custom status codes)
+/// - `Json<T>` - Extracts only `T` (infallible handlers)
+/// - Other types - Returns `(None, None)`
+///
+/// # Examples
+///
+/// ```ignore
+/// // For this return type:
+/// Result<Json<User>, ApiError>
+///
+/// // Returns: (Some("User"), Some("ApiError"))
+/// ```
+///
+/// ```ignore
+/// // For this return type with custom status code:
+/// Result<(StatusCode, Json<UserResponse>), CreateUserError>
+///
+/// // Returns: (Some("UserResponse"), Some("CreateUserError"))
+/// ```
+///
+/// ```ignore
+/// // For this infallible return type:
+/// Json<HelloResponse>
+///
+/// // Returns: (Some("HelloResponse"), None)
+/// ```
+///
+/// ```ignore
+/// // For this non-JSON return type:
+/// Result<StatusCode, DeleteUserError>
+///
+/// // Returns: (None, Some("DeleteUserError"))
+/// ```
+///
+/// # Returns
+///
+/// A tuple of `(Option<String>, Option<String>)` where:
+/// - First element: The success response type name (if `Json<T>` is found)
+/// - Second element: The error type name (if `Result<_, E>` is used)
+///
+/// # Note on Error Type Priority
+///
+/// The error type extracted here serves as a **default** for error responses.
+/// If a response documentation comment explicitly mentions a different error type
+/// (e.g., `/// - 400: Invalid input DeleteUserError`), that explicit type takes
+/// priority over the default error type from the function signature.
 fn extract_response_and_error_types(output: &ReturnType) -> (Option<String>, Option<String>) {
     if let ReturnType::Type(_, return_type) = output {
         if let Type::Path(type_path) = &**return_type {
