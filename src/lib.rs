@@ -1232,37 +1232,37 @@ where
                     let mut has_error_schema = false;
                     let mut error_schema = String::new();
 
-                    // First priority: use extracted error type from function signature with mapping
-                    if let Some(ref error_type) = extracted_error_type {
-                        // Clean up the type name (remove module paths, etc.)
-                        let clean_error_type = error_type.split("::").last().unwrap_or(error_type);
-
-                        // Map known error types to their schema equivalents
-                        let schema_name = match clean_error_type {
-                            "AppError" => "ErrorResponse", // Map AppError to ErrorResponse
-                            other => other, // Use the type name as-is for other errors
-                        };
-
-                        if registered_schemas.contains(schema_name) {
-                            self.used_schemas.insert(schema_name.to_string());
+                    // First priority: try exact schema name match in description (explicit override)
+                    for schema_name in &registered_schemas {
+                        if schema_name.ends_with("Error") && desc.contains(schema_name) {
+                            self.used_schemas.insert(schema_name.clone());
                             error_schema = format!("{{\"$ref\": \"#/components/schemas/{schema_name}\"}}");
                             has_error_schema = true;
+                            break;
                         }
                     }
 
-                    // If no extracted error type, try exact schema name match in description
+                    // Second priority: use extracted error type from function signature (default)
                     if !has_error_schema {
-                        for schema_name in &registered_schemas {
-                            if schema_name.ends_with("Error") && desc.contains(schema_name) {
-                                self.used_schemas.insert(schema_name.clone());
+                        if let Some(ref error_type) = extracted_error_type {
+                            // Clean up the type name (remove module paths, etc.)
+                            let clean_error_type = error_type.split("::").last().unwrap_or(error_type);
+
+                            // Map known error types to their schema equivalents
+                            let schema_name = match clean_error_type {
+                                "AppError" => "ErrorResponse", // Map AppError to ErrorResponse
+                                other => other, // Use the type name as-is for other errors
+                            };
+
+                            if registered_schemas.contains(schema_name) {
+                                self.used_schemas.insert(schema_name.to_string());
                                 error_schema = format!("{{\"$ref\": \"#/components/schemas/{schema_name}\"}}");
                                 has_error_schema = true;
-                                break;
                             }
                         }
                     }
 
-                    // If still no match, try general error matching
+                    // Third priority: try general error matching (fallback)
                     if !has_error_schema {
                         for schema_name in &registered_schemas {
                             if schema_name.ends_with("Error") && desc.to_lowercase().contains("error") {

@@ -4,7 +4,7 @@ use axum::{
     http::StatusCode,
 };
 use serde::{Deserialize, Serialize};
-use machined_openapi_gen::{api_router, api_handler, OpenApiSchema, api_error};
+use machined_openapi_gen::{api_router, api_handler, OpenApiSchema, api_error, get, post};
 
 #[derive(Serialize, OpenApiSchema)]
 struct HelloResponse {
@@ -43,7 +43,7 @@ enum GetUserError {
     /// 404: User not found for the given ID
     #[serde(rename = "user_not_found")]
     UserNotFound { id: u32 },
-    
+
     /// 400: Invalid user ID format
     #[serde(rename = "invalid_user_id")]
     InvalidUserId { id: u32 },
@@ -65,7 +65,7 @@ enum CreateUserError {
     /// 400: Invalid input data provided
     #[serde(rename = "invalid_input")]
     InvalidInput { message: String },
-    
+
     /// 500: Internal server error occurred
     #[serde(rename = "server_error")]
     ServerError { message: String },
@@ -78,7 +78,7 @@ enum DeleteUserError {
     /// 404: User not found
     #[serde(rename = "user_not_found")]
     UserNotFound { id: u32 },
-    
+
     /// 403: Insufficient permissions to delete user
     #[serde(rename = "insufficient_permissions")]
     InsufficientPermissions { id: u32 },
@@ -121,12 +121,12 @@ async fn greet(Json(request): Json<GreetRequest>) -> Result<Json<GreetResponse>,
         "casual" => format!("Hey {}! Great to see you!", name),
         "friendly" => format!("Hello there, {}! Welcome to our API!", name),
         _ => {
-            return Err(GreetError::InvalidRequest { 
+            return Err(GreetError::InvalidRequest {
                 message: format!("Unknown greeting style: '{}'. Supported styles: formal, casual, friendly", style)
             });
         }
     };
-    
+
     Ok(Json(GreetResponse {
         message,
         style: style.to_lowercase(),
@@ -135,7 +135,7 @@ async fn greet(Json(request): Json<GreetRequest>) -> Result<Json<GreetResponse>,
 
 /// Get user information by ID
 ///
-/// Retrieves user information for the specified user ID. 
+/// Retrieves user information for the specified user ID.
 /// Returns user data including name and email address.
 ///
 /// # Parameters
@@ -159,7 +159,7 @@ async fn get_user(Path(id): Path<u32>) -> Result<Json<UserResponse>, GetUserErro
         2 => {
             let user = UserResponse {
                 id: 2,
-                name: "Jane Smith".to_string(), 
+                name: "Jane Smith".to_string(),
                 email: "jane.smith@example.com".to_string(),
             };
             Ok(Json(user))
@@ -213,32 +213,32 @@ async fn delete_user(Path(id): Path<u32>) -> Result<StatusCode, DeleteUserError>
 ///
 /// # Responses
 /// - 201: User successfully created UserResponse
-/// - 400: Invalid input data provided CreateUserError
+/// - 400: Invalid input data provided DeleteUserError
 /// - 500: Internal server error occurred CreateUserError
 #[api_handler("user", "admin")]
 async fn create_user_with_errors(Json(request): Json<CreateUserRequest>) -> Result<(StatusCode, Json<UserResponse>), CreateUserError> {
     // Validate the input data
     if request.name.trim().is_empty() {
-        return Err(CreateUserError::InvalidInput { 
-            message: "Name cannot be empty".to_string() 
+        return Err(CreateUserError::InvalidInput {
+            message: "Name cannot be empty".to_string()
         });
     }
-    
+
     if !request.email.contains('@') || !request.email.contains('.') {
-        return Err(CreateUserError::InvalidInput { 
-            message: "Invalid email format".to_string() 
+        return Err(CreateUserError::InvalidInput {
+            message: "Invalid email format".to_string()
         });
     }
-    
+
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     use std::time::{SystemTime, UNIX_EPOCH};
-    
+
     let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
     let mut hasher = DefaultHasher::new();
     timestamp.hash(&mut hasher);
     let random_outcome = hasher.finish() % 100;
-    
+
     match random_outcome {
         0..=79 => {
             let user_response = UserResponse {
@@ -276,25 +276,24 @@ async fn main() {
             .tag_with_docs("user", Some("User management operations"), Some("Find out more about user management"), "https://example.com/docs/users")
             .tag("greeting", Some("Greeting and message endpoints"))
             .tag("admin", Some("Administrative operations requiring elevated permissions"))
-            .get("/", hello)
-            .post("/greet", greet) 
-            .get("/users/{id}", get_user)
-            .delete("/users/{id}", delete_user)
-            .post("/users", create_user_with_errors);
-            
+            .route("/", get(hello))
+            .route("/greet", post(greet))
+            .route("/users/{id}", get(get_user).delete(delete_user))
+            .route("/users", post(create_user_with_errors));
+
         println!("{}", router.openapi_json());
         return;
     }
-    
+
     let router = axum::Router::new()
         .route("/", axum::routing::get(hello))
-        .route("/greet", axum::routing::post(greet)) 
+        .route("/greet", axum::routing::post(greet))
         .route("/users/{id}", axum::routing::get(get_user))
         .route("/users/{id}", axum::routing::delete(delete_user))
         .route("/users", axum::routing::post(create_user_with_errors));
-    
+
     let app = router
-        .route("/openapi.json", axum::routing::get(|| async { 
+        .route("/openapi.json", axum::routing::get(|| async {
             r#"{"openapi":"3.0.0","info":{"title":"Hello World API","version":"1.0.0"},"paths":{}}"#
         }));
 
@@ -305,7 +304,7 @@ async fn run_server(app: axum::Router) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
         .await
         .unwrap();
-    
+
     println!("Server running on http://127.0.0.1:3000");
     println!("OpenAPI spec available at: http://127.0.0.1:3000/openapi.json");
     println!();
@@ -319,6 +318,6 @@ async fn run_server(app: axum::Router) {
     println!("Usage:");
     println!("  cargo run                 # Uses custom prefix /api/docs");
     println!("  cargo run -- --default    # Uses default prefix /openapi");
-    
+
     axum::serve(listener, app).await.unwrap();
 }
