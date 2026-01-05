@@ -1,10 +1,10 @@
-//! Simple machined-openapi-gen implementation without serde dependencies
+//! OpenAPI 3.0 specification generator for Axum route handlers
 //!
 //! # Architecture Overview
 //!
-//! This library provides a simple, procedural approach to generating OpenAPI 3.0 specifications
+//! This library provides a type-safe approach to generating OpenAPI 3.0 specifications
 //! from Axum route handlers. The core functionality is built around the `ApiRouter` struct and
-//! its `openapi_json()` method, which has been refactored into composable helper functions.
+//! its `openapi_json()` method, which uses strongly-typed OpenAPI structures and serde for serialization.
 //!
 //! ## Main Components
 //!
@@ -15,36 +15,43 @@
 //!
 //! The `openapi_json()` method orchestrates OpenAPI spec generation through these steps:
 //!
-//! 1. **Info Section** - Built by `build_info_json()` which delegates to:
-//!    - `build_contact_json()` - Generates contact information
-//!    - `build_license_json()` - Generates license information
+//! 1. **Documentation Collection** - `collect_handler_docs()` gathers all handler metadata
 //!
-//! 2. **Documentation Collection** - `collect_handler_docs()` gathers all handler metadata
-//!
-//! 3. **Schema Collection** - Tracks which schemas are actually used:
+//! 2. **Schema Collection** - Tracks which schemas are actually used:
 //!    - `collect_all_used_schemas()` - Collects schemas from all routes
 //!    - `collect_schemas_for_handler()` - Collects schemas from a single handler
 //!    - `collect_transitive_schema_dependencies()` - Recursively finds referenced schemas
 //!
-//! 4. **Paths Section** - Built by `build_paths_json()` which delegates to:
-//!    - `group_routes_by_path()` - Organizes routes by their path
-//!    - `build_path_json()` - Generates JSON for a single path
-//!    - `build_method_json()` - Generates JSON for a single HTTP method
+//! 3. **Info Section** - Built by `build_info()` which delegates to:
+//!    - `build_contact()` - Generates contact information structure
+//!    - `build_license()` - Generates license information structure
 //!
-//! 5. **Tags Section** - Built by `build_tags_json()`
+//! 4. **Tags Section** - Built by `build_tags()` - Creates tag structures with optional external docs
 //!
-//! 6. **Components Section** - Built by `build_components_json()` which delegates to:
+//! 5. **Components Section** - Built by `build_components()` which delegates to:
 //!    - `filter_used_schemas()` - Filters to only used schemas
-//!    - `build_schemas_json()` - Generates the schemas section
-//!    - `build_security_schemes_json()` - Generates security schemes if needed
+//!    - `build_security_schemes()` - Generates security schemes if needed
 //!    - `has_auth_endpoints()` - Checks if auth is required
+//!
+//! 6. **Paths Section** - Built by `build_paths()` which delegates to:
+//!    - `group_routes_by_path()` - Organizes routes by their path
+//!    - `build_path()` - Generates PathItem structure for a single path
+//!    - `build_method()` - Generates Operation structure for a single HTTP method
+//!
+//! 7. **Serialization** - The complete OpenAPI struct is serialized to JSON using serde
 //!
 //! ## Design Principles
 //!
-//! - **No Serde Dependency**: Uses manual JSON string building for minimal dependencies
+//! - **Type Safety**: Uses strongly-typed OpenAPI structures from the `openapi` module
+//! - **Serde Serialization**: Leverages serde for reliable JSON generation
 //! - **Single Responsibility**: Each helper function has one clear purpose
 //! - **Testability**: All helper functions are independently testable
 //! - **Composability**: Functions build on each other to create the complete spec
+
+pub mod openapi;
+
+#[cfg(test)]
+mod openapi_tests;
 
 use axum::Router;
 use std::collections::HashMap;
@@ -644,23 +651,13 @@ where
         // Clear used schemas to track fresh usage
         self.used_schemas.clear();
 
-        // Build the OpenAPI document with info section
-        let info_json = self.build_info_json();
-        let mut json = format!(r#"{{"openapi":"3.0.0",{},"#, info_json);
-
-        // Collect all registered handler documentation using helper function
-        let handler_docs = self.collect_handler_docs();
-
-        // Collect used schemas using helper function
-        let all_used_schemas = self.collect_all_used_schemas(&handler_docs);
-
-        // Add paths section using helper function
-        let paths_json = self.build_paths_json(&handler_docs);
-        json.push_str(&paths_json);
-
-        // Add tags section using helper function
-        let tags_json = self.build_tags_json();
-        json.push_str(&tags_json);
+        // First pass: collect handler docs to analyze schema usage
+        // Note: This creates temporary references from inventory, not from self
+        let handler_docs_temp = self.collect_handler_docs();
+        let all_used_schemas = self.collect_all_used_schemas(&handler_docs_temp);
+        
+        // Drop handler_docs_temp so we can mutate self
+        drop(handler_docs_temp);
 
         // Merge collected schemas into the main router's used_schemas
         for schema in all_used_schemas {
@@ -670,139 +667,114 @@ where
         // Recursively collect all transitively referenced schemas
         self.collect_transitive_schema_dependencies();
 
-        // Add components section using helper functions
+        // Determine if auth endpoints exist
         let has_auth_endpoints = self.has_auth_endpoints();
-        let components_json = self.build_components_json(has_auth_endpoints);
-        json.push_str(&components_json);
 
-        json.push('}');
-        json
+        // Second pass: collect handler docs again for building the spec
+        // Now that all mutations are complete
+        let handler_docs = self.collect_handler_docs();
+
+        // Build the OpenAPI document structure
+        let info = self.build_info();
+        let tags = self.build_tags();
+        let components = self.build_components(has_auth_endpoints);
+        let paths = self.build_paths(&handler_docs);
+
+        // Convert tags vector to Option (None if empty)
+        let tags_opt = if tags.is_empty() { None } else { Some(tags) };
+
+        // Create the OpenAPI document
+        let openapi = openapi::OpenAPI {
+            openapi: "3.0.0".to_string(),
+            info,
+            paths,
+            components,
+            tags: tags_opt,
+        };
+
+        // Serialize to JSON
+        serde_json::to_string(&openapi).unwrap_or_else(|e| {
+            eprintln!("Failed to serialize OpenAPI spec: {}", e);
+            r#"{"openapi":"3.0.0","info":{"title":"Error","version":"0.0.0"},"paths":{}}"#.to_string()
+        })
     }
 
-    /// Build the JSON string for the contact object.
-    ///
-    /// # Arguments
-    /// * `contact` - The contact information to serialize
+    /// Build the contact information structure.
     ///
     /// # Returns
-    /// A JSON string representing the contact object in the format `"contact":{...}`,
-    /// or an empty string if the contact has no fields populated.
+    /// An `Option<Contact>` containing the contact information if present.
     ///
     /// This is an internal helper method used by `build_info_json()` when constructing
     /// the OpenAPI info section.
-    fn build_contact_json(&self, contact: &Contact) -> String {
-        let mut contact_parts = Vec::new();
-        if let Some(ref name) = contact.name {
-            contact_parts.push(format!("\"name\":\"{name}\""));
-        }
-        if let Some(ref url) = contact.url {
-            contact_parts.push(format!("\"url\":\"{url}\""));
-        }
-        if let Some(ref email) = contact.email {
-            contact_parts.push(format!("\"email\":\"{email}\""));
-        }
-        if !contact_parts.is_empty() {
-            format!("\"contact\":{{{}}}", contact_parts.join(","))
-        } else {
-            String::new()
-        }
+    fn build_contact(&self) -> Option<openapi::Contact> {
+        self.openapi.info.contact.as_ref().map(|c| openapi::Contact {
+            name: c.name.clone(),
+            url: c.url.clone(),
+            email: c.email.clone(),
+        })
     }
 
-    /// Build the JSON string for the license object
-    ///
-    /// # Arguments
-    /// * `license` - The license information to serialize
+
+
+    /// Build the license information structure.
     ///
     /// # Returns
-    /// A JSON string representing the license object in the format `"license":{...}`
+    /// An `Option<License>` containing the license information if present.
     ///
     /// This is an internal helper method used by `build_info_json()` when constructing
     /// the OpenAPI info section.
-    fn build_license_json(&self, license: &License) -> String {
-        let mut license_parts = vec![format!("\"name\":\"{}\"", license.name)];
-        if let Some(ref url) = license.url {
-            license_parts.push(format!("\"url\":\"{url}\""));
-        }
-        format!("\"license\":{{{}}}", license_parts.join(","))
+    fn build_license(&self) -> Option<openapi::License> {
+        self.openapi.info.license.as_ref().map(|l| openapi::License {
+            name: l.name.clone(),
+            url: l.url.clone(),
+        })
     }
 
-    /// Build the complete info section JSON
+
+
+    /// Build the complete info structure.
     ///
     /// # Returns
-    /// A JSON string representing the complete info object with all optional fields
+    /// An `Info` struct with all the API metadata.
     ///
     /// This is an internal helper method used by `openapi_json()` when constructing
     /// the OpenAPI specification.
-    fn build_info_json(&self) -> String {
-        let mut info_parts = vec![
-            format!("\"title\":\"{}\"", self.openapi.info.title),
-            format!("\"version\":\"{}\"", self.openapi.info.version),
-        ];
-
-        if let Some(ref description) = self.openapi.info.description {
-            info_parts.push(format!(
-                "\"description\":\"{}\"",
-                description.replace("\"", "\\\"")
-            ));
+    fn build_info(&self) -> openapi::Info {
+        openapi::Info {
+            title: self.openapi.info.title.clone(),
+            version: self.openapi.info.version.clone(),
+            description: self.openapi.info.description.clone(),
+            terms_of_service: self.openapi.info.terms_of_service.clone(),
+            contact: self.build_contact(),
+            license: self.build_license(),
         }
-
-        if let Some(ref terms_of_service) = self.openapi.info.terms_of_service {
-            info_parts.push(format!("\"termsOfService\":\"{terms_of_service}\""));
-        }
-
-        if let Some(ref contact) = self.openapi.info.contact {
-            let contact_json = self.build_contact_json(contact);
-            if !contact_json.is_empty() {
-                info_parts.push(contact_json);
-            }
-        }
-
-        if let Some(ref license) = self.openapi.info.license {
-            info_parts.push(self.build_license_json(license));
-        }
-
-        format!(r#""info":{{{}}}"#, info_parts.join(","))
     }
 
-    /// Build the tags section JSON
+
+
+    /// Build the tags structure.
     ///
     /// # Returns
-    /// A JSON string representing the tags section in the format `,"tags":[...]`,
-    /// or an empty string if there are no tags.
+    /// A `Vec<Tag>` containing all API tags.
     ///
     /// This is an internal helper method used by `openapi_json()` when constructing
     /// the OpenAPI specification.
-    fn build_tags_json(&self) -> String {
-        if self.openapi.tags.is_empty() {
-            return String::new();
-        }
-
-        let tag_entries: Vec<String> = self
-            .openapi
+    fn build_tags(&self) -> Vec<openapi::Tag> {
+        self.openapi
             .tags
             .iter()
-            .map(|tag| {
-                let mut tag_obj = vec![format!(r#""name":"{}""#, tag.name)];
-                if let Some(ref description) = tag.description {
-                    tag_obj.push(format!(
-                        r#""description":"{}""#,
-                        description.replace("\"", "\\\"")
-                    ));
-                }
-                if let Some(ref external_docs) = tag.external_docs {
-                    let mut docs_parts = vec![format!(r#""url":"{}""#, external_docs.url)];
-                    if let Some(ref desc) = external_docs.description {
-                        docs_parts
-                            .push(format!(r#""description":"{}""#, desc.replace("\"", "\\\"")));
-                    }
-                    tag_obj.push(format!(r#""externalDocs":{{{}}}"#, docs_parts.join(",")));
-                }
-                format!("{{{}}}", tag_obj.join(","))
+            .map(|tag| openapi::Tag {
+                name: tag.name.clone(),
+                description: tag.description.clone(),
+                external_docs: tag.external_docs.as_ref().map(|docs| openapi::ExternalDocs {
+                    url: docs.url.clone(),
+                    description: docs.description.clone(),
+                }),
             })
-            .collect();
-
-        format!(r#","tags":[{}]"#, tag_entries.join(","))
+            .collect()
     }
+
+
 
     /// Group routes by their path
     ///
@@ -820,128 +792,167 @@ where
         path_methods
     }
 
-    /// Build JSON for a single HTTP method within a path
+    /// Build an Operation structure for a single HTTP method.
     ///
     /// # Arguments
     /// * `route` - The route information for this method
     /// * `doc` - Optional handler documentation for this route
     ///
     /// # Returns
-    /// A JSON string representing the method object in OpenAPI format
+    /// An `Operation` struct representing the method in OpenAPI format
     ///
     /// This is an internal helper method used by `build_path_json()` when constructing
     /// the OpenAPI paths section.
-    fn build_method_json(
+    fn build_method(
         &self,
         route: &RouteInfo,
         doc: Option<&HandlerDocumentation>,
-    ) -> String {
+    ) -> openapi::Operation {
         let (summary, description) = if let Some(doc) = doc {
-            (doc.summary.to_string(), doc.description.to_string())
+            (Some(doc.summary.to_string()), Some(doc.description.to_string()))
         } else {
             (
-                route.summary.clone().unwrap_or_else(|| format!("{} {}", route.method, route.path)),
-                "No description available".to_string()
+                route.summary.clone().or_else(|| Some(format!("{} {}", route.method, route.path))),
+                Some("No description available".to_string())
             )
         };
 
-        let mut method_parts = vec![
-            format!(r#""summary": "{}""#, summary.replace("\"", "\\\"")),
-            format!(r#""description": "{}""#, description.replace("\"", "\\\"")),
-            format!(r#""x-handler-function": "{}""#, route.function_name)
-        ];
+        let mut tags = Vec::new();
+        let mut parameters = Vec::new();
+        let mut request_body = None;
+        let mut responses = std::collections::HashMap::new();
+        let mut security = None;
 
         if let Some(doc) = doc {
-            // Add tags
+            // Parse tags
             if !doc.tags.is_empty() && doc.tags != "[]" {
-                let tags = self.parse_tags_to_openapi(doc.tags);
-                if !tags.is_empty() {
-                    method_parts.push(format!(r#""tags": {tags}"#));
+                let tags_json = self.parse_tags_to_openapi(doc.tags);
+                if let Ok(parsed_tags) = serde_json::from_str::<Vec<String>>(&tags_json) {
+                    tags = parsed_tags;
                 }
             }
 
-            // Add parameters
+            // Parse parameters
             if !doc.parameters.is_empty() && doc.parameters != "[]" {
-                let parameters = self.parse_parameters_to_openapi(doc.parameters);
-                if !parameters.is_empty() {
-                    method_parts.push(format!(r#""parameters": {parameters}"#));
+                let params_json = self.parse_parameters_to_openapi(doc.parameters);
+                if let Ok(parsed_params) = serde_json::from_str::<Vec<openapi::Parameter>>(&params_json) {
+                    parameters = parsed_params;
                 }
             }
 
-            // Add security requirements
+            // Parse security requirements
             if doc.parameters.contains("__REQUIRES_AUTH__") {
-                method_parts.push(r#""security": [{"sessionAuth": []}]"#.to_string());
+                let mut sec_req = std::collections::HashMap::new();
+                sec_req.insert("sessionAuth".to_string(), vec![]);
+                security = Some(vec![sec_req]);
             }
 
-            // Add request body
+            // Parse request body
             if !doc.request_body.is_empty() && doc.request_body != "[]" {
                 let mut temp_router: ApiRouter<()> = ApiRouter::new("temp", "temp");
-                let request_body = temp_router.parse_request_body_to_openapi(doc.request_body);
-                method_parts.push(format!(r#""requestBody": {request_body}"#));
+                let request_body_json = temp_router.parse_request_body_to_openapi(doc.request_body);
+                if let Ok(parsed_body) = serde_json::from_str::<openapi::RequestBody>(&request_body_json) {
+                    request_body = Some(parsed_body);
+                }
             }
 
-            // Add responses
+            // Parse responses
             if !doc.responses.is_empty() && doc.responses != "[]" {
                 let mut temp_router: ApiRouter<()> = ApiRouter::new("temp", "temp");
-                let responses = temp_router.parse_responses_to_openapi(doc.responses);
-                method_parts.push(format!(r#""responses": {responses}"#));
-            } else {
-                method_parts.push(r#""responses": {"200": {"description": "Successful response"}}"#.to_string());
+                let responses_json = temp_router.parse_responses_to_openapi(doc.responses);
+                if let Ok(parsed_responses) = serde_json::from_str::<std::collections::HashMap<String, openapi::Response>>(&responses_json) {
+                    responses = parsed_responses;
+                }
             }
-        } else {
-            method_parts.push(r#""responses": {"200": {"description": "Successful response"}}"#.to_string());
         }
 
-        format!(r#""{}": {{{}}}"#, route.method.to_lowercase(), method_parts.join(","))
+        // Add default 200 response if no responses were parsed
+        if responses.is_empty() {
+            responses.insert("200".to_string(), openapi::Response {
+                description: "Successful response".to_string(),
+                content: None,
+            });
+        }
+
+        openapi::Operation {
+            summary,
+            description,
+            handler_function: Some(route.function_name.clone()),
+            tags,
+            parameters,
+            request_body,
+            responses,
+            security,
+        }
     }
 
-    /// Build JSON for a single path with all its methods
+    /// Build a PathItem structure for a single path with all its methods
     ///
     /// # Arguments
-    /// * `path` - The path string (e.g., "/users/:id")
     /// * `routes` - All routes that share this path
     /// * `handler_docs` - HashMap of handler documentation indexed by function name
     ///
     /// # Returns
-    /// A JSON string representing the path object with all its HTTP methods
+    /// A `PathItem` containing all HTTP method operations for this path
     ///
-    /// This is an internal helper method used by `build_paths_json()` when constructing
+    /// This is an internal helper method used by `build_paths()` when constructing
     /// the OpenAPI paths section.
-    fn build_path_json(
+    fn build_path(
         &self,
-        path: &str,
         routes: &[&RouteInfo],
         handler_docs: &HashMap<&str, &HandlerDocumentation>,
-    ) -> String {
-        let openapi_path = self.convert_path_to_openapi(path);
-        
-        let methods: Vec<String> = routes.iter().map(|route| {
-            let doc = handler_docs.get(route.function_name.as_str()).copied();
-            self.build_method_json(route, doc)
-        }).collect();
+    ) -> openapi::PathItem {
+        let mut path_item = openapi::PathItem::default();
 
-        format!(r#""{}": {{{}}}"#, openapi_path, methods.join(","))
+        for route in routes {
+            let doc = handler_docs.get(route.function_name.as_str()).copied();
+            let operation = self.build_method(route, doc);
+            
+            // Assign operation to the appropriate HTTP method field
+            match route.method.to_uppercase().as_str() {
+                "GET" => path_item.get = Some(operation),
+                "POST" => path_item.post = Some(operation),
+                "PUT" => path_item.put = Some(operation),
+                "DELETE" => path_item.delete = Some(operation),
+                "PATCH" => path_item.patch = Some(operation),
+                "HEAD" => path_item.head = Some(operation),
+                "OPTIONS" => path_item.options = Some(operation),
+                _ => {
+                    eprintln!("Warning: Unsupported HTTP method: {}", route.method);
+                }
+            }
+        }
+
+        path_item
     }
 
-    /// Build the complete paths section JSON
+
+
+
+
+    /// Build the complete paths section structure
     ///
     /// # Arguments
     /// * `handler_docs` - HashMap of handler documentation indexed by function name
     ///
     /// # Returns
-    /// A JSON string representing the entire paths section in OpenAPI format
+    /// A HashMap mapping OpenAPI path strings to their PathItem structures
     ///
     /// This is an internal helper method used by `openapi_json()` to build the paths
     /// section of the OpenAPI specification.
-    fn build_paths_json(&self, handler_docs: &HashMap<&str, &HandlerDocumentation>) -> String {
+    fn build_paths(&self, handler_docs: &HashMap<&str, &HandlerDocumentation>) -> HashMap<String, openapi::PathItem> {
         let path_methods = self.group_routes_by_path();
 
-        let paths: Vec<String> = path_methods.iter()
-            .map(|(path, routes)| self.build_path_json(path, routes, handler_docs))
-            .collect();
-
-        format!(r#""paths":{{{}}}"#, paths.join(","))
+        path_methods.iter()
+            .map(|(path, routes)| {
+                let openapi_path = self.convert_path_to_openapi(path);
+                let path_item = self.build_path(routes, handler_docs);
+                (openapi_path, path_item)
+            })
+            .collect()
     }
+
+
 
     /// Collect all handler documentation from inventory
     ///
@@ -1044,69 +1055,68 @@ where
         used_components_schemas
     }
 
-    /// Build the security schemes JSON
+    /// Build the security schemes structure.
     ///
     /// # Returns
-    /// A JSON string representing the securitySchemes section
+    /// An `Option<HashMap<String, SecurityScheme>>` containing security schemes if auth is needed.
     ///
     /// This is an internal helper method used by `build_components_json()`.
-    fn build_security_schemes_json(&self) -> String {
-        r#""securitySchemes":{"sessionAuth":{"type":"apiKey","in":"header","name":"x-session-secret","description":"API session token for authentication"}}"#.to_string()
+    fn build_security_schemes(&self) -> Option<std::collections::HashMap<String, openapi::SecurityScheme>> {
+        // For now, we only have session auth
+        // In the future, this could check if any endpoints require auth
+        let mut schemes = std::collections::HashMap::new();
+        schemes.insert(
+            "sessionAuth".to_string(),
+            openapi::SecurityScheme::api_key("x-session-secret", "header")
+                .with_description("API session token for authentication"),
+        );
+        Some(schemes)
     }
 
-    /// Build the schemas section within components
-    ///
-    /// # Arguments
-    /// * `used_schemas` - HashMap of schema names to their JSON representations
-    ///
-    /// # Returns
-    /// A JSON string representing the schemas section, or empty string if no schemas
-    ///
-    /// This is an internal helper method used by `build_components_json()`.
-    fn build_schemas_json(&self, used_schemas: &HashMap<String, String>) -> String {
-        if used_schemas.is_empty() {
-            return String::new();
-        }
-
-        let schema_entries: Vec<String> = used_schemas.iter()
-            .map(|(name, schema)| format!(r#""{name}": {schema}"#))
-            .collect();
-
-        format!(r#""schemas":{{{}}}"#, schema_entries.join(","))
-    }
-
-    /// Build the complete components section JSON
+    /// Build the components structure.
     ///
     /// # Arguments
     /// * `has_auth` - Whether any endpoints require authentication
     ///
     /// # Returns
-    /// A JSON string representing the components section in the format `,"components":{...}`,
-    /// or an empty string if there are no components
+    /// An `Option<Components>` containing schemas and security schemes if present.
     ///
     /// This is an internal helper method used by `openapi_json()`.
-    fn build_components_json(&self, has_auth: bool) -> String {
+    fn build_components(&self, has_auth: bool) -> Option<openapi::Components> {
         let used_schemas = self.filter_used_schemas();
 
         if used_schemas.is_empty() && !has_auth {
-            return String::new();
+            return None;
         }
 
-        let mut components_parts = Vec::new();
+        // Convert schema JSON strings to Schema objects
+        // Note: For now, we keep the schemas as JSON strings since they're dynamically generated
+        // A future step could convert these to proper Schema structs
+        let schemas: std::collections::HashMap<String, openapi::ReferenceOr<openapi::Schema>> = 
+            used_schemas.iter()
+                .map(|(name, json_str)| {
+                    // Parse the JSON string into a Schema object
+                    let schema: openapi::Schema = serde_json::from_str(json_str)
+                        .unwrap_or_else(|_| openapi::Schema::default());
+                    (name.clone(), openapi::ReferenceOr::Item(schema))
+                })
+                .collect();
 
-        // Add schemas section
-        let schemas_json = self.build_schemas_json(&used_schemas);
-        if !schemas_json.is_empty() {
-            components_parts.push(schemas_json);
-        }
-
-        // Add security schemes section
-        if has_auth {
-            components_parts.push(self.build_security_schemes_json());
-        }
-
-        format!(r#","components":{{{}}}"#, components_parts.join(","))
+        Some(openapi::Components {
+            schemas,
+            security_schemes: if has_auth {
+                self.build_security_schemes()
+            } else {
+                None
+            },
+        })
     }
+
+
+
+
+
+
 
     /// Get a list of unused schemas (schemas that are registered but not referenced in any endpoint)
     pub fn get_unused_schemas(&mut self) -> Vec<String> {
@@ -2219,137 +2229,67 @@ mod tests {
     }
 
     #[test]
-    fn test_build_contact_json() {
-        let router = api_router!("Test API", "1.0.0");
+    fn test_build_contact() {
+        let router = api_router!("Test API", "1.0.0")
+            .contact(Some("Test Team"), Some("https://example.com"), Some("test@example.com"));
 
-        // Test with all fields populated
-        let contact_full = Contact {
-            name: Some("Test Team".to_string()),
-            url: Some("https://example.com".to_string()),
-            email: Some("test@example.com".to_string()),
-        };
-        let json_full = router.build_contact_json(&contact_full);
-        assert_eq!(
-            json_full,
-            r#""contact":{"name":"Test Team","url":"https://example.com","email":"test@example.com"}"#
-        );
+        let contact = router.build_contact();
+        assert!(contact.is_some());
+        let c = contact.unwrap();
+        assert_eq!(c.name, Some("Test Team".to_string()));
+        assert_eq!(c.url, Some("https://example.com".to_string()));
+        assert_eq!(c.email, Some("test@example.com".to_string()));
 
-        // Test with only name
-        let contact_name_only = Contact {
-            name: Some("Test Team".to_string()),
-            url: None,
-            email: None,
-        };
-        let json_name_only = router.build_contact_json(&contact_name_only);
-        assert_eq!(json_name_only, r#""contact":{"name":"Test Team"}"#);
-
-        // Test with only email
-        let contact_email_only = Contact {
-            name: None,
-            url: None,
-            email: Some("test@example.com".to_string()),
-        };
-        let json_email_only = router.build_contact_json(&contact_email_only);
-        assert_eq!(json_email_only, r#""contact":{"email":"test@example.com"}"#);
-
-        // Test with only url
-        let contact_url_only = Contact {
-            name: None,
-            url: Some("https://example.com".to_string()),
-            email: None,
-        };
-        let json_url_only = router.build_contact_json(&contact_url_only);
-        assert_eq!(json_url_only, r#""contact":{"url":"https://example.com"}"#);
-
-        // Test with empty contact (all fields None)
-        let contact_empty = Contact {
-            name: None,
-            url: None,
-            email: None,
-        };
-        let json_empty = router.build_contact_json(&contact_empty);
-        assert_eq!(json_empty, "");
-
-        // Test with name and email (no url)
-        let contact_name_email = Contact {
-            name: Some("Test Team".to_string()),
-            url: None,
-            email: Some("test@example.com".to_string()),
-        };
-        let json_name_email = router.build_contact_json(&contact_name_email);
-        assert_eq!(
-            json_name_email,
-            r#""contact":{"name":"Test Team","email":"test@example.com"}"#
-        );
+        // Test with no contact
+        let router_no_contact = api_router!("Test API", "1.0.0");
+        assert!(router_no_contact.build_contact().is_none());
     }
 
     #[test]
-    fn test_build_license_json() {
-        let router = api_router!("Test API", "1.0.0");
-
-        // Test with license name and URL
-        let license_with_url = License {
-            name: "MIT".to_string(),
-            url: Some("https://opensource.org/licenses/MIT".to_string()),
-        };
-        let json_with_url = router.build_license_json(&license_with_url);
-        assert_eq!(
-            json_with_url,
-            r#""license":{"name":"MIT","url":"https://opensource.org/licenses/MIT"}"#
-        );
-
-        // Test with license name only (no URL)
-        let license_no_url = License {
-            name: "Apache 2.0".to_string(),
-            url: None,
-        };
-        let json_no_url = router.build_license_json(&license_no_url);
-        assert_eq!(json_no_url, r#""license":{"name":"Apache 2.0"}"#);
-    }
-
-    #[test]
-    fn test_build_info_json() {
-        // Test with minimal info (title and version only)
-        let router_minimal = api_router!("Test API", "1.0.0");
-        let info_json = router_minimal.build_info_json();
-        assert!(info_json.contains(r#""title":"Test API""#));
-        assert!(info_json.contains(r#""version":"1.0.0""#));
-        assert!(info_json.starts_with(r#""info":{"#));
-
-        // Test with description
-        let router_with_desc = api_router!("Test API", "1.0.0").description("A test API");
-        let info_json_desc = router_with_desc.build_info_json();
-        assert!(info_json_desc.contains(r#""description":"A test API""#));
-
-        // Test with contact
-        let router_with_contact = api_router!("Test API", "1.0.0")
-            .contact(Some("Test Team"), Some("https://example.com"), None);
-        let info_json_contact = router_with_contact.build_info_json();
-        assert!(info_json_contact.contains(r#""contact":"#));
-        assert!(info_json_contact.contains(r#""name":"Test Team""#));
-
-        // Test with license
-        let router_with_license = api_router!("Test API", "1.0.0")
+    fn test_build_license() {
+        let router = api_router!("Test API", "1.0.0")
             .license("MIT", Some("https://opensource.org/licenses/MIT"));
-        let info_json_license = router_with_license.build_info_json();
-        assert!(info_json_license.contains(r#""license":"#));
-        assert!(info_json_license.contains(r#""name":"MIT""#));
+
+        let license = router.build_license();
+        assert!(license.is_some());
+        let l = license.unwrap();
+        assert_eq!(l.name, "MIT");
+        assert_eq!(l.url, Some("https://opensource.org/licenses/MIT".to_string()));
+
+        // Test with no license
+        let router_no_license = api_router!("Test API", "1.0.0");
+        assert!(router_no_license.build_license().is_none());
     }
 
     #[test]
-    fn test_build_tags_json() {
+    fn test_build_info() {
+        let router = api_router!("Test API", "1.0.0")
+            .description("A test API")
+            .contact(Some("Test Team"), Some("https://example.com"), None)
+            .license("MIT", Some("https://opensource.org/licenses/MIT"));
+
+        let info = router.build_info();
+        assert_eq!(info.title, "Test API");
+        assert_eq!(info.version, "1.0.0");
+        assert_eq!(info.description, Some("A test API".to_string()));
+        assert!(info.contact.is_some());
+        assert!(info.license.is_some());
+    }
+
+    #[test]
+    fn test_build_tags() {
         // Test with no tags
         let router_no_tags = api_router!("Test API", "1.0.0");
-        let tags_json_empty = router_no_tags.build_tags_json();
-        assert_eq!(tags_json_empty, "");
+        let tags = router_no_tags.build_tags();
+        assert_eq!(tags.len(), 0);
 
         // Test with a simple tag
         let router_with_tag = api_router!("Test API", "1.0.0")
             .tag("users", Some("User management endpoints"));
-        let tags_json = router_with_tag.build_tags_json();
-        assert!(tags_json.starts_with(r#","tags":["#));
-        assert!(tags_json.contains(r#""name":"users""#));
-        assert!(tags_json.contains(r#""description":"User management endpoints""#));
+        let tags = router_with_tag.build_tags();
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].name, "users");
+        assert_eq!(tags[0].description, Some("User management endpoints".to_string()));
 
         // Test with tag with external docs
         let router_with_docs = api_router!("Test API", "1.0.0")
@@ -2359,10 +2299,13 @@ mod tests {
                 Some("Admin Documentation"),
                 "https://docs.example.com/admin"
             );
-        let tags_json_docs = router_with_docs.build_tags_json();
-        assert!(tags_json_docs.contains(r#""name":"admin""#));
-        assert!(tags_json_docs.contains(r#""externalDocs":"#));
-        assert!(tags_json_docs.contains(r#""url":"https://docs.example.com/admin""#));
+        let tags = router_with_docs.build_tags();
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].name, "admin");
+        assert!(tags[0].external_docs.is_some());
+        let docs = tags[0].external_docs.as_ref().unwrap();
+        assert_eq!(docs.url, "https://docs.example.com/admin");
+        assert_eq!(docs.description, Some("Admin Documentation".to_string()));
     }
 
     #[test]
@@ -2405,7 +2348,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_method_json() {
+    fn test_build_method() {
         let router = api_router!("Test API", "1.0.0");
 
         // Test with no documentation
@@ -2417,20 +2360,19 @@ mod tests {
             description: None,
         };
 
-        let method_json = router.build_method_json(&route, None);
-
-        // Should contain the method key
-        assert!(method_json.contains(r#""get":"#));
+        let operation = router.build_method(&route, None);
+        
         // Should contain summary from route
-        assert!(method_json.contains(r#""summary": "Test summary""#));
+        assert_eq!(operation.summary, Some("Test summary".to_string()));
         // Should contain handler function name
-        assert!(method_json.contains(r#""x-handler-function": "test_handler""#));
+        assert_eq!(operation.handler_function, Some("test_handler".to_string()));
         // Should have default response
-        assert!(method_json.contains(r#""responses": {"200": {"description": "Successful response"}}"#));
+        assert!(operation.responses.contains_key("200"));
+        assert_eq!(operation.responses["200"].description, "Successful response");
     }
 
     #[test]
-    fn test_build_path_json() {
+    fn test_build_path() {
         let mut router = api_router!("Test API", "1.0.0");
 
         // Create test routes
@@ -2455,17 +2397,17 @@ mod tests {
         let routes_vec = vec![&route1, &route2];
         let handler_docs = HashMap::new();
 
-        let path_json = router.build_path_json("/users", &routes_vec, &handler_docs);
+        let path_item = router.build_path(&routes_vec, &handler_docs);
 
-        // Should contain the path
-        assert!(path_json.contains(r#""/users":"#));
         // Should contain both methods
-        assert!(path_json.contains(r#""get":"#));
-        assert!(path_json.contains(r#""post":"#));
+        assert!(path_item.get.is_some());
+        assert!(path_item.post.is_some());
+        assert_eq!(path_item.get.as_ref().unwrap().summary, Some("Get all users".to_string()));
+        assert_eq!(path_item.post.as_ref().unwrap().summary, Some("Create a user".to_string()));
     }
 
     #[test]
-    fn test_build_paths_json() {
+    fn test_build_paths() {
         let mut router = api_router!("Test API", "1.0.0");
 
         // Create test routes
@@ -2485,14 +2427,15 @@ mod tests {
         });
 
         let handler_docs = HashMap::new();
-        let paths_json = router.build_paths_json(&handler_docs);
+        let paths = router.build_paths(&handler_docs);
 
-        // Should start with "paths":{
-        assert!(paths_json.starts_with(r#""paths":{"#));
         // Should contain both paths
-        assert!(paths_json.contains(r#""/users":"#));
+        assert!(paths.contains_key("/users"));
         // Should convert :id to {id} in OpenAPI format
-        assert!(paths_json.contains(r#""/items/{id}":"#));
+        assert!(paths.contains_key("/items/{id}"));
+        // Verify path items have operations
+        assert!(paths["/users"].get.is_some());
+        assert!(paths["/items/{id}"].get.is_some());
     }
 
     #[test]
@@ -2531,53 +2474,35 @@ mod tests {
     }
 
     #[test]
-    fn test_build_security_schemes_json() {
+    fn test_build_security_schemes() {
         let router = api_router!("Test API", "1.0.0");
         
-        let security_json = router.build_security_schemes_json();
+        let schemes = router.build_security_schemes();
         
         // Should contain the security scheme
-        assert!(security_json.contains("securitySchemes"));
-        assert!(security_json.contains("sessionAuth"));
-        assert!(security_json.contains("apiKey"));
-        assert!(security_json.contains("x-session-secret"));
+        assert!(schemes.is_some());
+        let s = schemes.unwrap();
+        assert!(s.contains_key("sessionAuth"));
+        let session_auth = &s["sessionAuth"];
+        assert_eq!(session_auth.scheme_type, "apiKey");
+        assert_eq!(session_auth.name, Some("x-session-secret".to_string()));
+        assert_eq!(session_auth.location, Some("header".to_string()));
     }
 
     #[test]
-    fn test_build_schemas_json() {
+    fn test_build_components() {
         let router = api_router!("Test API", "1.0.0");
         
-        // Test with empty schemas
-        let empty_schemas = HashMap::new();
-        let empty_json = router.build_schemas_json(&empty_schemas);
-        assert_eq!(empty_json, "");
-        
-        // Test with one schema
-        let mut schemas = HashMap::new();
-        schemas.insert("User".to_string(), r#"{"type":"object"}"#.to_string());
-        let json = router.build_schemas_json(&schemas);
-        assert!(json.starts_with(r#""schemas":{"#));
-        assert!(json.contains(r#""User": {"type":"object"}"#));
-    }
-
-    #[test]
-    fn test_build_components_json() {
-        let mut router = api_router!("Test API", "1.0.0");
-        
         // Test with no auth and no schemas
-        let components_empty = router.build_components_json(false);
-        assert_eq!(components_empty, "");
+        let components_empty = router.build_components(false);
+        assert!(components_empty.is_none());
         
         // Test with auth but no schemas
-        let components_auth = router.build_components_json(true);
-        assert!(components_auth.starts_with(r#","components":{"#));
-        assert!(components_auth.contains("securitySchemes"));
-        
-        // Test with schemas - add to used_schemas
-        router.used_schemas.insert("MockSchema".to_string());
-        let components_with_schemas = router.build_components_json(false);
-        // May or may not be empty depending on whether MockSchema exists in inventory
-        assert!(components_with_schemas.is_empty() || components_with_schemas.contains("components"));
+        let components_auth = router.build_components(true);
+        assert!(components_auth.is_some());
+        let comp = components_auth.unwrap();
+        assert!(comp.security_schemes.is_some());
+        assert!(comp.security_schemes.as_ref().unwrap().contains_key("sessionAuth"));
     }
 
     #[test]
@@ -2643,6 +2568,149 @@ mod tests {
         // Performance assertion - should complete in reasonable time
         // This is a sanity check, not a strict benchmark
         assert!(duration.as_millis() < 1000, "OpenAPI generation took too long: {:?}", duration);
+    }
+
+    #[test]
+    fn test_serde_based_functions() {
+        // Test full OpenAPI generation with serde-based functions
+        let mut router = api_router!("Complete API", "1.0.0")
+            .description("A complete test")
+            .contact(Some("API Team"), Some("https://api.example.com"), Some("api@example.com"))
+            .license("Apache 2.0", Some("https://www.apache.org/licenses/LICENSE-2.0"))
+            .tag("users", Some("User operations"))
+            .tag_with_docs(
+                "admin",
+                Some("Admin operations"),
+                Some("More info"),
+                "https://docs.example.com/admin"
+            );
+        
+        let openapi_json = router.openapi_json();
+        
+        // Parse to verify it's valid JSON
+        let parsed: serde_json::Value = serde_json::from_str(&openapi_json)
+            .expect("Should generate valid JSON");
+        
+        assert_eq!(parsed["openapi"], "3.0.0");
+        assert_eq!(parsed["info"]["title"], "Complete API");
+        assert_eq!(parsed["info"]["version"], "1.0.0");
+        assert_eq!(parsed["info"]["description"], "A complete test");
+        assert_eq!(parsed["info"]["contact"]["name"], "API Team");
+        assert_eq!(parsed["info"]["contact"]["url"], "https://api.example.com");
+        assert_eq!(parsed["info"]["contact"]["email"], "api@example.com");
+        assert_eq!(parsed["info"]["license"]["name"], "Apache 2.0");
+        assert_eq!(parsed["info"]["license"]["url"], "https://www.apache.org/licenses/LICENSE-2.0");
+        
+        // Verify tags
+        assert!(parsed["tags"].is_array());
+        assert_eq!(parsed["tags"][0]["name"], "users");
+        assert_eq!(parsed["tags"][0]["description"], "User operations");
+        assert_eq!(parsed["tags"][1]["name"], "admin");
+        assert_eq!(parsed["tags"][1]["description"], "Admin operations");
+        assert_eq!(parsed["tags"][1]["externalDocs"]["url"], "https://docs.example.com/admin");
+        assert_eq!(parsed["tags"][1]["externalDocs"]["description"], "More info");
+    }
+
+    #[test]
+    fn test_step2_2_baseline_comparison() {
+        // This test ensures no regressions by comparing critical sections
+        // with known good output format
+        
+        let mut router = api_router!("Hello World API", "1.0.0")
+            .description("A comprehensive example API demonstrating machined-openapi-gen's automatic OpenAPI generation capabilities. This API showcases various endpoint types, request/response schemas, error handling, and documentation features.")
+            .terms_of_service("https://example.com/terms")
+            .contact(Some("API Support Team"), Some("https://example.com/support"), Some("support@example.com"))
+            .license("MIT", Some("https://opensource.org/licenses/MIT"))
+            .tag("health", Some("Health check and status endpoints"))
+            .tag_with_docs("user", Some("User management operations"), Some("Find out more about user management"), "https://example.com/docs/users")
+            .tag("greeting", Some("Greeting and message endpoints"))
+            .tag("admin", Some("Administrative operations requiring elevated permissions"));
+        
+        let openapi_json = router.openapi_json();
+        
+        // Parse the generated JSON
+        let parsed: serde_json::Value = serde_json::from_str(&openapi_json)
+            .expect("Should generate valid OpenAPI JSON");
+        
+        // Verify Info section matches baseline format
+        assert_eq!(parsed["openapi"], "3.0.0");
+        assert_eq!(parsed["info"]["title"], "Hello World API");
+        assert_eq!(parsed["info"]["version"], "1.0.0");
+        assert_eq!(parsed["info"]["termsOfService"], "https://example.com/terms");
+        assert_eq!(parsed["info"]["contact"]["name"], "API Support Team");
+        assert_eq!(parsed["info"]["contact"]["url"], "https://example.com/support");
+        assert_eq!(parsed["info"]["contact"]["email"], "support@example.com");
+        assert_eq!(parsed["info"]["license"]["name"], "MIT");
+        assert_eq!(parsed["info"]["license"]["url"], "https://opensource.org/licenses/MIT");
+        
+        // Verify Tags section matches baseline format
+        let tags = parsed["tags"].as_array().expect("tags should be an array");
+        assert_eq!(tags.len(), 4);
+        
+        // First tag (health)
+        assert_eq!(tags[0]["name"], "health");
+        assert_eq!(tags[0]["description"], "Health check and status endpoints");
+        assert!(tags[0]["externalDocs"].is_null());
+        
+        // Second tag (user with external docs)
+        assert_eq!(tags[1]["name"], "user");
+        assert_eq!(tags[1]["description"], "User management operations");
+        assert_eq!(tags[1]["externalDocs"]["url"], "https://example.com/docs/users");
+        assert_eq!(tags[1]["externalDocs"]["description"], "Find out more about user management");
+        
+        // Third tag (greeting)
+        assert_eq!(tags[2]["name"], "greeting");
+        assert_eq!(tags[2]["description"], "Greeting and message endpoints");
+        
+        // Fourth tag (admin)
+        assert_eq!(tags[3]["name"], "admin");
+        assert_eq!(tags[3]["description"], "Administrative operations requiring elevated permissions");
+        
+        // Verify field naming conventions are correct (camelCase)
+        let json_str = serde_json::to_string_pretty(&parsed).unwrap();
+        assert!(json_str.contains("termsOfService"));
+        assert!(json_str.contains("externalDocs"));
+        assert!(!json_str.contains("terms_of_service"));
+        assert!(openapi_json.contains("externalDocs") || !router.openapi.tags.iter().any(|t| t.external_docs.is_some()));
+        assert!(!openapi_json.contains("external_docs"));
+    }
+
+    #[test]
+    fn test_baseline_structure_comparison() {
+        // This test ensures functions produce OpenAPI-compliant structure
+        
+        let mut router = api_router!("Hello World API", "1.0.0")
+            .description("Test API")
+            .contact(Some("Team"), Some("https://example.com"), Some("team@example.com"))
+            .license("MIT", Some("https://opensource.org/licenses/MIT"))
+            .tag("test", Some("Test operations"));
+        
+        let openapi_json = router.openapi_json();
+        
+        // Parse and verify structure
+        let parsed: serde_json::Value = serde_json::from_str(&openapi_json)
+            .expect("Should generate valid OpenAPI JSON");
+        
+        // Verify root structure
+        assert_eq!(parsed["openapi"], "3.0.0");
+        assert!(parsed["info"].is_object());
+        assert!(parsed["paths"].is_object());
+        
+        // Verify info section from mid-level functions (Step 2.2)
+        assert_eq!(parsed["info"]["title"], "Hello World API");
+        assert_eq!(parsed["info"]["contact"]["name"], "Team");
+        assert_eq!(parsed["info"]["license"]["name"], "MIT");
+        
+        // Verify tags from mid-level functions (Step 2.2)
+        assert!(parsed["tags"].is_array());
+        assert_eq!(parsed["tags"][0]["name"], "test");
+        
+        // Verify all field names are properly formatted (camelCase)
+        let json_str = serde_json::to_string_pretty(&parsed).unwrap();
+        assert!(json_str.contains("termsOfService") || !json_str.contains("terms"));
+        assert!(json_str.contains("securitySchemes") || !json_str.contains("security"));
+        assert!(!json_str.contains("terms_of_service"));
+        assert!(!json_str.contains("security_schemes"));
     }
 }
 
