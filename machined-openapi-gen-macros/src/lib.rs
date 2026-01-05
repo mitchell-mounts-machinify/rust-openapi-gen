@@ -165,7 +165,7 @@ fn extract_docs(attrs: &[Attribute]) -> ParsedDocs {
             },
             "responses" => {
                 // Parse response lines - both simple and elaborate formats
-                if line.starts_with("- ") || line.starts_with("* ") {
+                if (line.starts_with("- ") || line.starts_with("* ")) && !line.starts_with("- name:") {
                     let response_text = line[2..].trim();
 
                     if let Some(colon_pos) = response_text.find(':') {
@@ -1368,7 +1368,6 @@ pub fn api_error(_attr: TokenStream, item: TokenStream) -> TokenStream {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use quote::quote;
     use syn::parse_quote;
 
     #[test]
@@ -1438,12 +1437,12 @@ mod tests {
 
     #[test]
     fn test_sanitize_type_for_identifier() {
-        assert_eq!(sanitize_type_for_identifier("Vec<String>"), "Vec_String_");
-        assert_eq!(sanitize_type_for_identifier("HashMap<String, Value>"), "HashMap_String_Value_");
-        assert_eq!(sanitize_type_for_identifier("Option<User>"), "Option_User_");
-        assert_eq!(sanitize_type_for_identifier("Result<T, E>"), "Result_T_E_");
-        assert_eq!(sanitize_type_for_identifier("&str"), "_str");
-        assert_eq!(sanitize_type_for_identifier("*const u8"), "_const_u8");
+        assert_eq!(sanitize_type_for_identifier("Vec<String>"), "Vec_String");
+        assert_eq!(sanitize_type_for_identifier("HashMap<String, Value>"), "HashMap_String_Value");
+        assert_eq!(sanitize_type_for_identifier("Option<User>"), "Option_User");
+        assert_eq!(sanitize_type_for_identifier("Result<T, E>"), "Result_T_E");
+        assert_eq!(sanitize_type_for_identifier("&str"), "str");
+        assert_eq!(sanitize_type_for_identifier("*const u8"), "const_u8");
     }
 
     #[test]
