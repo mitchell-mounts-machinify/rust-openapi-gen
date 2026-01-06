@@ -975,7 +975,8 @@ fn generate_external_tagged_enum_schema(
 ///
 /// ```rust
 /// use serde::Serialize;
-/// use machined_openapi_gen_macros::StoneSchema;
+/// use machined_openapi_gen_macros::OpenApiSchema;
+/// use machined_openapi_gen::OpenApiSchema as OpenApiSchemaTrait;
 ///
 /// #[derive(Serialize, OpenApiSchema)]
 /// struct User {
@@ -1061,9 +1062,9 @@ fn generate_external_tagged_enum_schema(
 /// # use machined_openapi_gen::api_handler;
 /// # use machined_openapi_gen_macros::OpenApiSchema;
 /// # use serde::{Serialize, Deserialize};
-/// # #[derive(Deserialize, StoneSchema)] struct CreateUserRequest { name: String }
-/// # #[derive(Serialize, StoneSchema)] struct User { id: u32, name: String }
-/// # #[derive(Serialize, StoneSchema)] enum ApiError { NotFound }
+/// # #[derive(Deserialize, OpenApiSchema)] struct CreateUserRequest { name: String }
+/// # #[derive(Serialize, OpenApiSchema)] struct User { id: u32, name: String }
+/// # #[derive(Serialize, OpenApiSchema)] enum ApiError { NotFound }
 /// # use axum::response::IntoResponse;
 /// # impl IntoResponse for ApiError { fn into_response(self) -> axum::response::Response { todo!() } }
 ///
@@ -1251,8 +1252,10 @@ pub fn derive_openapi_schema(input: TokenStream) -> TokenStream {
 ///
 /// ```rust
 /// use machined_openapi_gen_macros::api_error;
+/// use serde::Serialize;
 ///
 /// #[api_error]
+/// #[derive(Serialize)]
 /// enum ApiError {
 ///     /// 404: User not found
 ///     UserNotFound { id: u32 },
@@ -1339,11 +1342,11 @@ pub fn derive_openapi_schema(input: TokenStream) -> TokenStream {
 ///
 /// ```rust,no_run
 /// # use axum::Json;
-/// # use machined_openapi_gen_macros::{api_error, api_handler, StoneSchema};
+/// # use machined_openapi_gen_macros::{api_error, api_handler, OpenApiSchema};
 /// # use serde::{Serialize, Deserialize};
-/// # #[derive(Deserialize, StoneSchema)]
+/// # #[derive(Deserialize, OpenApiSchema)]
 /// # struct UpdateUserRequest { name: String }
-/// # #[derive(Serialize, StoneSchema)]
+/// # #[derive(Serialize, OpenApiSchema)]
 /// # struct User { id: u32, name: String }
 /// # #[api_error]
 /// # #[derive(Serialize)]
