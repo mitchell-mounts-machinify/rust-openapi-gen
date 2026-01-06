@@ -1,12 +1,20 @@
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, ItemFn, Attribute, Lit, Meta, Expr, Type, FnArg, ReturnType, PathArguments, GenericArgument, DeriveInput, Data, Fields, Variant};
+use syn::{
+    parse_macro_input, Attribute, Data, DeriveInput, Expr, Fields, FnArg, GenericArgument, ItemFn,
+    Lit, Meta, PathArguments, ReturnType, Type, Variant,
+};
 
 /// Sanitize a type string to create a valid Rust identifier
 #[allow(dead_code)]
 fn sanitize_type_for_identifier(type_str: &str) -> String {
     type_str
-        .replace(['<', '>', ' ', ',', ':', ';', '(', ')', '[', ']', '{', '}', '&', '*'], "_")
+        .replace(
+            [
+                '<', '>', ' ', ',', ':', ';', '(', ')', '[', ']', '{', '}', '&', '*',
+            ],
+            "_",
+        )
         .replace("__", "_")
         .trim_matches('_')
         .to_string()
@@ -24,7 +32,7 @@ struct ResponseDoc {
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 struct ResponseContent {
-    media_type: String, // e.g., "application/json"
+    media_type: String,     // e.g., "application/json"
     schema: Option<String>, // e.g., "ErrorResponse"
 }
 
@@ -145,7 +153,7 @@ fn extract_docs(attrs: &[Attribute]) -> ParsedDocs {
                         }
                     }
                 }
-            },
+            }
             "request_body" => {
                 // Parse request body format like "Content-Type: application/json" followed by description
                 if let Some(stripped) = line.strip_prefix("Content-Type:") {
@@ -162,7 +170,7 @@ fn extract_docs(attrs: &[Attribute]) -> ParsedDocs {
                         body.description.push_str(line);
                     }
                 }
-            },
+            }
             "responses" => {
                 // Parse response lines - both simple and elaborate formats
                 if (line.starts_with("- ") || line.starts_with("* ")) && !line.starts_with("- name:") {
@@ -193,19 +201,19 @@ fn extract_docs(attrs: &[Attribute]) -> ParsedDocs {
                             }
                         }
                     }
-                } else if !responses.is_empty() && (
-                    line.starts_with("description:") ||
-                    line.starts_with("content:") ||
-                    line.starts_with("application/json:") ||
-                    line.starts_with("application/xml:") ||
-                    line.starts_with("text/plain:") ||
-                    line.starts_with("schema:") ||
-                    line.starts_with("examples:") ||
-                    line.starts_with("- name:") ||
-                    line.starts_with("name:") ||
-                    line.starts_with("summary:") ||
-                    line.starts_with("value:")
-                ) {
+                } else if !responses.is_empty()
+                    && (line.starts_with("description:")
+                        || line.starts_with("content:")
+                        || line.starts_with("application/json:")
+                        || line.starts_with("application/xml:")
+                        || line.starts_with("text/plain:")
+                        || line.starts_with("schema:")
+                        || line.starts_with("examples:")
+                        || line.starts_with("- name:")
+                        || line.starts_with("name:")
+                        || line.starts_with("summary:")
+                        || line.starts_with("value:"))
+                {
                     // YAML-like property line - part of elaborate response format
                     if let Some(last_response) = responses.last_mut() {
                         if let Some(desc) = line.strip_prefix("description:") {
@@ -219,7 +227,10 @@ fn extract_docs(attrs: &[Attribute]) -> ParsedDocs {
                                     schema: None,
                                 });
                             }
-                        } else if line.starts_with("application/json:") || line.starts_with("application/xml:") || line.starts_with("text/plain:") {
+                        } else if line.starts_with("application/json:")
+                            || line.starts_with("application/xml:")
+                            || line.starts_with("text/plain:")
+                        {
                             // Parse media type
                             let media_type = line.split(':').next().unwrap_or("application/json");
                             if last_response.content.is_none() {
@@ -283,7 +294,7 @@ fn extract_docs(attrs: &[Attribute]) -> ParsedDocs {
                         }
                     }
                 }
-            },
+            }
             _ => {
                 // Regular description lines
                 if !line.starts_with("#") {
@@ -350,7 +361,9 @@ fn extract_docs(attrs: &[Attribute]) -> ParsedDocs {
 ///
 /// - `Some(String)` containing the type name if a `Json<T>` parameter is found
 /// - `None` if no JSON request body parameter exists
-fn extract_request_body_type(inputs: &syn::punctuated::Punctuated<FnArg, syn::token::Comma>) -> Option<String> {
+fn extract_request_body_type(
+    inputs: &syn::punctuated::Punctuated<FnArg, syn::token::Comma>,
+) -> Option<String> {
     for input in inputs {
         if let FnArg::Typed(pat_type) = input {
             if let Type::Path(type_path) = &*pat_type.ty {
@@ -372,7 +385,9 @@ fn extract_request_body_type(inputs: &syn::punctuated::Punctuated<FnArg, syn::to
 
 /// Check if function parameters include an Authorized parameter
 /// This indicates the endpoint requires authentication
-fn has_authorized_parameter(inputs: &syn::punctuated::Punctuated<FnArg, syn::token::Comma>) -> bool {
+fn has_authorized_parameter(
+    inputs: &syn::punctuated::Punctuated<FnArg, syn::token::Comma>,
+) -> bool {
     for input in inputs {
         if let FnArg::Typed(pat_type) = input {
             if let Type::Path(type_path) = &*pat_type.ty {
@@ -393,7 +408,10 @@ fn has_authorized_parameter(inputs: &syn::punctuated::Punctuated<FnArg, syn::tok
 /// - `#[example = "sample_value"]`
 /// - `#[default = "default_value"]`
 /// - `#[doc = "Field description [example: value, default: value]"]`
-fn enhance_schema_with_attributes(attrs: &[Attribute], base_schema: String) -> (String, Option<String>) {
+fn enhance_schema_with_attributes(
+    attrs: &[Attribute],
+    base_schema: String,
+) -> (String, Option<String>) {
     let mut example: Option<String> = None;
     let mut default: Option<String> = None;
 
@@ -424,15 +442,20 @@ fn enhance_schema_with_attributes(attrs: &[Attribute], base_schema: String) -> (
                         // Look for [example: value, default: value] format
                         if let Some(bracket_start) = doc_text.rfind('[') {
                             if let Some(bracket_end) = doc_text[bracket_start..].find(']') {
-                                let metadata_str = &doc_text[bracket_start + 1..bracket_start + bracket_end];
+                                let metadata_str =
+                                    &doc_text[bracket_start + 1..bracket_start + bracket_end];
                                 for part in metadata_str.split(',') {
                                     let part = part.trim();
                                     if let Some(colon_pos) = part.find(':') {
                                         let key = part[..colon_pos].trim();
                                         let value = part[colon_pos + 1..].trim();
                                         match key {
-                                            "example" if example.is_none() => example = Some(value.to_string()),
-                                            "default" if default.is_none() => default = Some(value.to_string()),
+                                            "example" if example.is_none() => {
+                                                example = Some(value.to_string())
+                                            }
+                                            "default" if default.is_none() => {
+                                                default = Some(value.to_string())
+                                            }
                                             _ => {}
                                         }
                                     }
@@ -452,7 +475,7 @@ fn enhance_schema_with_attributes(attrs: &[Attribute], base_schema: String) -> (
         // Add example to the schema
         enhanced_schema = enhanced_schema.replace(
             "}",
-            &format!(",\"example\":\"{}\"}}", example_value.replace("\"", "\\\""))
+            &format!(",\"example\":\"{}\"}}", example_value.replace("\"", "\\\"")),
         );
     }
 
@@ -460,7 +483,7 @@ fn enhance_schema_with_attributes(attrs: &[Attribute], base_schema: String) -> (
         // Add default to the schema
         enhanced_schema = enhanced_schema.replace(
             "}",
-            &format!(",\"default\":\"{}\"}}", default_value.replace("\"", "\\\""))
+            &format!(",\"default\":\"{}\"}}", default_value.replace("\"", "\\\"")),
         );
     }
 
@@ -538,12 +561,17 @@ fn extract_response_and_error_types(output: &ReturnType) -> (Option<String>, Opt
                         let mut error_type = None;
 
                         // First argument is success type
-                        if let Some(GenericArgument::Type(Type::Path(ok_path))) = args.args.first() {
+                        if let Some(GenericArgument::Type(Type::Path(ok_path))) = args.args.first()
+                        {
                             // Check if it's Json<T>
                             if let Some(json_segment) = ok_path.path.segments.last() {
                                 if json_segment.ident == "Json" {
-                                    if let PathArguments::AngleBracketed(json_args) = &json_segment.arguments {
-                                        if let Some(GenericArgument::Type(inner_type)) = json_args.args.first() {
+                                    if let PathArguments::AngleBracketed(json_args) =
+                                        &json_segment.arguments
+                                    {
+                                        if let Some(GenericArgument::Type(inner_type)) =
+                                            json_args.args.first()
+                                        {
                                             response_type = Some(quote!(#inner_type).to_string());
                                         }
                                     }
@@ -572,7 +600,6 @@ fn extract_response_and_error_types(output: &ReturnType) -> (Option<String>, Opt
     }
     (None, None)
 }
-
 
 /// Simple api_handler attribute that works with current simplified implementation
 ///
@@ -617,7 +644,10 @@ pub fn api_handler(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 
     let fn_name_str = fn_name.to_string();
-    let summary = doc_lines.first().unwrap_or(&"No summary".to_string()).clone();
+    let summary = doc_lines
+        .first()
+        .unwrap_or(&"No summary".to_string())
+        .clone();
 
     // Extract description (everything after summary but before any # sections)
     let mut description_lines = Vec::new();
@@ -694,10 +724,17 @@ pub fn api_handler(attr: TokenStream, item: TokenStream) -> TokenStream {
             } else {
                 responses.push(response_line);
             }
-        } else if current_section == "responses" && !line.starts_with("#") && !line.starts_with("- ") {
+        } else if current_section == "responses"
+            && !line.starts_with("#")
+            && !line.starts_with("- ")
+        {
             // Handle YAML-style continuation lines for complex responses
             if line.trim().starts_with("description:") {
-                let desc = line.trim().strip_prefix("description:").unwrap_or("").trim();
+                let desc = line
+                    .trim()
+                    .strip_prefix("description:")
+                    .unwrap_or("")
+                    .trim();
                 // Update the last response entry with the description
                 if let Some(last_response) = responses.last_mut() {
                     if last_response.ends_with(':') {
@@ -751,10 +788,37 @@ pub fn api_handler(attr: TokenStream, item: TokenStream) -> TokenStream {
         enhanced_responses.push(format!("ErrorType: {err_type}"));
     }
 
-    let parameters_json = format!("[{}]", enhanced_parameters.iter().map(|p| format!("\"{}\"", p.replace("\"", "\\\""))).collect::<Vec<_>>().join(","));
-    let responses_json = format!("[{}]", enhanced_responses.iter().map(|r| format!("\"{}\"", r.replace("\"", "\\\""))).collect::<Vec<_>>().join(","));
-    let request_body_json = format!("[{}]", enhanced_request_body.iter().map(|rb| format!("\"{}\"", rb.replace("\"", "\\\""))).collect::<Vec<_>>().join(","));
-    let tags_json = format!("[{}]", tags.iter().map(|t| format!("\"{}\"", t.replace("\"", "\\\""))).collect::<Vec<_>>().join(","));
+    let parameters_json = format!(
+        "[{}]",
+        enhanced_parameters
+            .iter()
+            .map(|p| format!("\"{}\"", p.replace("\"", "\\\"")))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let responses_json = format!(
+        "[{}]",
+        enhanced_responses
+            .iter()
+            .map(|r| format!("\"{}\"", r.replace("\"", "\\\"")))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let request_body_json = format!(
+        "[{}]",
+        enhanced_request_body
+            .iter()
+            .map(|rb| format!("\"{}\"", rb.replace("\"", "\\\"")))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let tags_json = format!(
+        "[{}]",
+        tags.iter()
+            .map(|t| format!("\"{}\"", t.replace("\"", "\\\"")))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
 
     let output = quote! {
         #input
@@ -790,7 +854,9 @@ pub fn documented_router(_input: TokenStream) -> TokenStream {
 }
 
 /// Generate schema for enum variants with external tagging
-fn generate_external_tagged_enum_schema(variants: &syn::punctuated::Punctuated<Variant, syn::token::Comma>) -> String {
+fn generate_external_tagged_enum_schema(
+    variants: &syn::punctuated::Punctuated<Variant, syn::token::Comma>,
+) -> String {
     let mut one_of_schemas = Vec::new();
 
     for variant in variants {
@@ -815,8 +881,12 @@ fn generate_external_tagged_enum_schema(variants: &syn::punctuated::Punctuated<V
                             let schema_ref = match inner_type.as_str() {
                                 // Basic primitive types
                                 "String" | "str" => "{\"type\":\"string\"}".to_string(),
-                                "i8" | "i16" | "i32" | "i64" | "i128" | "isize" => "{\"type\":\"integer\"}".to_string(),
-                                "u8" | "u16" | "u32" | "u64" | "u128" | "usize" => "{\"type\":\"integer\"}".to_string(),
+                                "i8" | "i16" | "i32" | "i64" | "i128" | "isize" => {
+                                    "{\"type\":\"integer\"}".to_string()
+                                }
+                                "u8" | "u16" | "u32" | "u64" | "u128" | "usize" => {
+                                    "{\"type\":\"integer\"}".to_string()
+                                }
                                 "f32" | "f64" => "{\"type\":\"number\"}".to_string(),
                                 "bool" => "{\"type\":\"boolean\"}".to_string(),
 
@@ -827,14 +897,18 @@ fn generate_external_tagged_enum_schema(variants: &syn::punctuated::Punctuated<V
 
                                 // Common types that should be strings
                                 "Uuid" => "{\"type\":\"string\",\"format\":\"uuid\"}".to_string(),
-                                "DateTime" | "NaiveDateTime" | "NaiveDate" | "NaiveTime" => "{\"type\":\"string\",\"format\":\"date-time\"}".to_string(),
+                                "DateTime" | "NaiveDateTime" | "NaiveDate" | "NaiveTime" => {
+                                    "{\"type\":\"string\",\"format\":\"date-time\"}".to_string()
+                                }
                                 "Url" => "{\"type\":\"string\",\"format\":\"uri\"}".to_string(),
 
                                 // Wrappers
                                 "Option" => "{\"type\":\"string\"}".to_string(), // Simplified
                                 "Result" => "{\"type\":\"object\"}".to_string(), // Simplified
 
-                                _ => format!("{{\"$ref\":\"#/components/schemas/{}\"}}", inner_type),
+                                _ => {
+                                    format!("{{\"$ref\":\"#/components/schemas/{}\"}}", inner_type)
+                                }
                             };
 
                             format!(
@@ -1033,48 +1107,80 @@ pub fn derive_openapi_schema(input: TokenStream) -> TokenStream {
                                         let type_name = segment.ident.to_string();
                                         match type_name.as_str() {
                                             // Basic primitive types
-                                            "String" | "str" => ("{\"type\":\"string\"}".to_string(), false),
-                                            "i8" | "i16" | "i32" | "i64" | "i128" | "isize" => ("{\"type\":\"integer\"}".to_string(), false),
-                                            "u8" | "u16" | "u32" | "u64" | "u128" | "usize" => ("{\"type\":\"integer\"}".to_string(), false),
-                                            "f32" | "f64" => ("{\"type\":\"number\"}".to_string(), false),
+                                            "String" | "str" => {
+                                                ("{\"type\":\"string\"}".to_string(), false)
+                                            }
+                                            "i8" | "i16" | "i32" | "i64" | "i128" | "isize" => {
+                                                ("{\"type\":\"integer\"}".to_string(), false)
+                                            }
+                                            "u8" | "u16" | "u32" | "u64" | "u128" | "usize" => {
+                                                ("{\"type\":\"integer\"}".to_string(), false)
+                                            }
+                                            "f32" | "f64" => {
+                                                ("{\"type\":\"number\"}".to_string(), false)
+                                            }
                                             "bool" => ("{\"type\":\"boolean\"}".to_string(), false),
 
                                             // Standard library collection types
                                             "Vec" => ("{\"type\":\"array\"}".to_string(), false),
-                                            "HashMap" | "BTreeMap" => ("{\"type\":\"object\"}".to_string(), false),
-                                            "HashSet" | "BTreeSet" => ("{\"type\":\"array\"}".to_string(), false),
+                                            "HashMap" | "BTreeMap" => {
+                                                ("{\"type\":\"object\"}".to_string(), false)
+                                            }
+                                            "HashSet" | "BTreeSet" => {
+                                                ("{\"type\":\"array\"}".to_string(), false)
+                                            }
 
                                             // Common types that should be strings
-                                            "Uuid" => ("{\"type\":\"string\",\"format\":\"uuid\"}".to_string(), false),
-                                            "DateTime" | "NaiveDateTime" | "NaiveDate" | "NaiveTime" => ("{\"type\":\"string\",\"format\":\"date-time\"}".to_string(), false),
-                                            "Url" => ("{\"type\":\"string\",\"format\":\"uri\"}".to_string(), false),
+                                            "Uuid" => (
+                                                "{\"type\":\"string\",\"format\":\"uuid\"}"
+                                                    .to_string(),
+                                                false,
+                                            ),
+                                            "DateTime" | "NaiveDateTime" | "NaiveDate"
+                                            | "NaiveTime" => (
+                                                "{\"type\":\"string\",\"format\":\"date-time\"}"
+                                                    .to_string(),
+                                                false,
+                                            ),
+                                            "Url" => (
+                                                "{\"type\":\"string\",\"format\":\"uri\"}"
+                                                    .to_string(),
+                                                false,
+                                            ),
 
                                             // Option wrapper - simplified handling
                                             "Option" => {
                                                 // For Option<T>, we need to parse the generic parameter
                                                 // For now, default to string but this could be enhanced
                                                 ("{\"type\":\"string\"}".to_string(), false)
-                                            },
+                                            }
 
                                             // Result wrapper - treat as the success type for now
                                             "Result" => {
                                                 ("{\"type\":\"object\"}".to_string(), false)
-                                            },
+                                            }
 
                                             _ => {
                                                 // Custom types - create schema reference
-                                                (format!("{{\"$ref\":\"#/components/schemas/{}\"}}", type_name), true)
+                                                (
+                                                    format!(
+                                                        "{{\"$ref\":\"#/components/schemas/{}\"}}",
+                                                        type_name
+                                                    ),
+                                                    true,
+                                                )
                                             }
                                         }
                                     } else {
                                         ("{\"type\":\"string\"}".to_string(), false)
                                     }
-                                },
+                                }
                                 _ => ("{\"type\":\"string\"}".to_string(), false), // default for complex types
                             };
 
                             // Parse field attributes for examples and defaults
-                            let (enhanced_schema, default_value) = enhance_schema_with_attributes(&field.attrs, type_schema);
+                            let (enhanced_schema, default_value) =
+                                enhance_schema_with_attributes(&field.attrs, type_schema);
                             properties.push(format!("\"{field_name_str}\":{}", enhanced_schema));
 
                             // If there's a default value, this field is not required
@@ -1102,20 +1208,18 @@ pub fn derive_openapi_schema(input: TokenStream) -> TokenStream {
                         format!(",\"required\":[{}]", required.join(","))
                     };
 
-                    format!("{{\"type\":\"object\",\"properties\":{{{properties_str}}}{required_str}}}")
-                },
-                _ => {
-                    "{\"type\":\"object\"}".to_string()
+                    format!(
+                        "{{\"type\":\"object\",\"properties\":{{{properties_str}}}{required_str}}}"
+                    )
                 }
+                _ => "{\"type\":\"object\"}".to_string(),
             }
-        },
+        }
         Data::Enum(data_enum) => {
             // Generate oneOf schema for enums with external tagging
             generate_external_tagged_enum_schema(&data_enum.variants)
-        },
-        _ => {
-            "{\"type\":\"string\"}".to_string()
         }
+        _ => "{\"type\":\"string\"}".to_string(),
     };
 
     let expanded = quote! {
@@ -1316,11 +1420,13 @@ pub fn api_error(_attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 
     // Generate match arms for IntoResponse implementation
-    let match_arms = variant_status_codes.iter().map(|(variant_name, status_code)| {
-        quote! {
-            Self::#variant_name { .. } => #status_code
-        }
-    });
+    let match_arms = variant_status_codes
+        .iter()
+        .map(|(variant_name, status_code)| {
+            quote! {
+                Self::#variant_name { .. } => #status_code
+            }
+        });
 
     // Generate the implementation
     let expanded = quote! {
@@ -1455,7 +1561,10 @@ mod tests {
 
         let docs = extract_docs(&attrs);
         assert_eq!(docs.summary, Some("Simple handler".to_string()));
-        assert_eq!(docs.description, Some("This is a simple test handler".to_string()));
+        assert_eq!(
+            docs.description,
+            Some("This is a simple test handler".to_string())
+        );
     }
 
     #[test]
@@ -1496,7 +1605,10 @@ mod tests {
 
         let body = docs.request_body.unwrap();
         assert_eq!(body.content_type, "application/json");
-        assert_eq!(body.description, "User data for creation - name (string): Full name - email (string): Email address");
+        assert_eq!(
+            body.description,
+            "User data for creation - name (string): Full name - email (string): Email address"
+        );
     }
 
     #[test]

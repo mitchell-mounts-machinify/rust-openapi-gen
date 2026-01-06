@@ -1,10 +1,6 @@
-use axum::{
-    extract::Path,
-    Json,
-    http::StatusCode,
-};
+use axum::{extract::Path, http::StatusCode, Json};
+use machined_openapi_gen::{api_error, api_handler, api_router, get, post, OpenApiSchema};
 use serde::{Deserialize, Serialize};
-use machined_openapi_gen::{api_router, api_handler, OpenApiSchema, api_error, get, post};
 
 #[derive(Serialize, OpenApiSchema)]
 struct HelloResponse {
@@ -122,7 +118,10 @@ async fn greet(Json(request): Json<GreetRequest>) -> Result<Json<GreetResponse>,
         "friendly" => format!("Hello there, {}! Welcome to our API!", name),
         _ => {
             return Err(GreetError::InvalidRequest {
-                message: format!("Unknown greeting style: '{}'. Supported styles: formal, casual, friendly", style)
+                message: format!(
+                    "Unknown greeting style: '{}'. Supported styles: formal, casual, friendly",
+                    style
+                ),
             });
         }
     };
@@ -155,7 +154,7 @@ async fn get_user(Path(id): Path<u32>) -> Result<Json<UserResponse>, GetUserErro
                 email: "john.doe@example.com".to_string(),
             };
             Ok(Json(user))
-        },
+        }
         2 => {
             let user = UserResponse {
                 id: 2,
@@ -163,13 +162,9 @@ async fn get_user(Path(id): Path<u32>) -> Result<Json<UserResponse>, GetUserErro
                 email: "jane.smith@example.com".to_string(),
             };
             Ok(Json(user))
-        },
-        999 => {
-            Err(GetUserError::InvalidUserId { id })
-        },
-        _ => {
-            Err(GetUserError::UserNotFound { id })
         }
+        999 => Err(GetUserError::InvalidUserId { id }),
+        _ => Err(GetUserError::UserNotFound { id }),
     }
 }
 
@@ -191,13 +186,9 @@ async fn delete_user(Path(id): Path<u32>) -> Result<StatusCode, DeleteUserError>
         1 | 2 => {
             println!("Deleting user with ID: {}", id);
             Ok(StatusCode::NO_CONTENT)
-        },
-        3 => {
-            Err(DeleteUserError::InsufficientPermissions { id })
-        },
-        _ => {
-            Err(DeleteUserError::UserNotFound { id })
         }
+        3 => Err(DeleteUserError::InsufficientPermissions { id }),
+        _ => Err(DeleteUserError::UserNotFound { id }),
     }
 }
 
@@ -216,17 +207,19 @@ async fn delete_user(Path(id): Path<u32>) -> Result<StatusCode, DeleteUserError>
 /// - 400: Invalid input data provided DeleteUserError
 /// - 500: Internal server error occurred CreateUserError
 #[api_handler("user", "admin")]
-async fn create_user_with_errors(Json(request): Json<CreateUserRequest>) -> Result<(StatusCode, Json<UserResponse>), CreateUserError> {
+async fn create_user_with_errors(
+    Json(request): Json<CreateUserRequest>,
+) -> Result<(StatusCode, Json<UserResponse>), CreateUserError> {
     // Validate the input data
     if request.name.trim().is_empty() {
         return Err(CreateUserError::InvalidInput {
-            message: "Name cannot be empty".to_string()
+            message: "Name cannot be empty".to_string(),
         });
     }
 
     if !request.email.contains('@') || !request.email.contains('.') {
         return Err(CreateUserError::InvalidInput {
-            message: "Invalid email format".to_string()
+            message: "Invalid email format".to_string(),
         });
     }
 
@@ -234,7 +227,10 @@ async fn create_user_with_errors(Json(request): Json<CreateUserRequest>) -> Resu
     use std::hash::{Hash, Hasher};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
     let mut hasher = DefaultHasher::new();
     timestamp.hash(&mut hasher);
     let random_outcome = hasher.finish() % 100;
@@ -247,15 +243,12 @@ async fn create_user_with_errors(Json(request): Json<CreateUserRequest>) -> Resu
                 email: request.email,
             };
             Ok((StatusCode::CREATED, Json(user_response)))
-        },
-        _ => {
-            Err(CreateUserError::ServerError {
-                message: "Database connection failed".to_string()
-            })
         }
+        _ => Err(CreateUserError::ServerError {
+            message: "Database connection failed".to_string(),
+        }),
     }
 }
-
 
 #[tokio::main]
 async fn main() {
@@ -292,10 +285,12 @@ async fn main() {
         .route("/users/{id}", axum::routing::delete(delete_user))
         .route("/users", axum::routing::post(create_user_with_errors));
 
-    let app = router
-        .route("/openapi.json", axum::routing::get(|| async {
+    let app = router.route(
+        "/openapi.json",
+        axum::routing::get(|| async {
             r#"{"openapi":"3.0.0","info":{"title":"Hello World API","version":"1.0.0"},"paths":{}}"#
-        }));
+        }),
+    );
 
     run_server(app).await;
 }
