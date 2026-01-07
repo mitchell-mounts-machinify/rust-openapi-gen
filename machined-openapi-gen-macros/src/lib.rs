@@ -853,10 +853,327 @@ pub fn documented_router(_input: TokenStream) -> TokenStream {
     TokenStream::from(output)
 }
 
+/// Enum tagging strategy (from serde attributes)
+#[derive(Debug, Clone, PartialEq)]
+enum EnumTagging {
+    /// External tagging (default): `{"VariantName": {...}}`
+    External,
+    /// Internal tagging: `{"tag_field": "variant_name", ...other fields}`
+    Internal { tag: String },
+    /// Adjacent tagging: `{"tag_field": "variant_name", "content_field": {...}}`
+    Adjacent { tag: String, content: String },
+    /// Untagged: variants are distinguished by structure alone
+    Untagged,
+}
+
+/// Serde rename strategy for variant names
+#[derive(Debug, Clone, PartialEq)]
+enum RenameAll {
+    None,
+    Lowercase,
+    Uppercase,
+    PascalCase,
+    CamelCase,
+    SnakeCase,
+    ScreamingSnakeCase,
+    KebabCase,
+    ScreamingKebabCase,
+}
+
+/// Parse serde rename_all attribute
+fn parse_rename_all(attrs: &[Attribute]) -> RenameAll {
+    for attr in attrs {
+        if let Meta::List(meta_list) = &attr.meta {
+            if meta_list.path.is_ident("serde") {
+                let tokens_str = meta_list.tokens.to_string();
+                
+                if let Some(rename_start) = tokens_str.find("rename_all = \"") {
+                    let rename_value_start = rename_start + 14;
+                    if let Some(rename_end) = tokens_str[rename_value_start..].find('"') {
+                        let rename_value = &tokens_str[rename_value_start..rename_value_start + rename_end];
+                        return match rename_value {
+                            "lowercase" => RenameAll::Lowercase,
+                            "UPPERCASE" => RenameAll::Uppercase,
+                            "PascalCase" => RenameAll::PascalCase,
+                            "camelCase" => RenameAll::CamelCase,
+                            "snake_case" => RenameAll::SnakeCase,
+                            "SCREAMING_SNAKE_CASE" => RenameAll::ScreamingSnakeCase,
+                            "kebab-case" => RenameAll::KebabCase,
+                            "SCREAMING-KEBAB-CASE" => RenameAll::ScreamingKebabCase,
+                            _ => RenameAll::None,
+                        };
+                    }
+                }
+            }
+        }
+    }
+    RenameAll::None
+}
+
+/// Parse serde attributes to determine enum tagging strategy
+fn parse_enum_tagging(attrs: &[Attribute]) -> EnumTagging {
+    for attr in attrs {
+        if let Meta::List(meta_list) = &attr.meta {
+            if meta_list.path.is_ident("serde") {
+                let tokens_str = meta_list.tokens.to_string();
+
+                // Parse tag attribute
+                if let Some(tag_start) = tokens_str.find("tag = \"") {
+                    let tag_value_start = tag_start + 7;
+                    if let Some(tag_end) = tokens_str[tag_value_start..].find('"') {
+                        let tag = tokens_str[tag_value_start..tag_value_start + tag_end].to_string();
+
+                        // Check for content attribute (adjacent tagging)
+                        if let Some(content_start) = tokens_str.find("content = \"") {
+                            let content_value_start = content_start + 11;
+                            if let Some(content_end) = tokens_str[content_value_start..].find('"') {
+                                let content = tokens_str[content_value_start..content_value_start + content_end].to_string();
+                                return EnumTagging::Adjacent { tag, content };
+                            }
+                        }
+
+                        // Only tag, no content (internal tagging)
+                        return EnumTagging::Internal { tag };
+                    }
+                }
+
+                // Check for untagged
+                if tokens_str.contains("untagged") {
+                    return EnumTagging::Untagged;
+                }
+            }
+        }
+    }
+
+    EnumTagging::External
+}
+
+/// Apply rename_all transformation to a variant name
+fn apply_rename_all(variant_name: &str, rename_all: &RenameAll) -> String {
+    match rename_all {
+        RenameAll::None => variant_name.to_string(),
+        RenameAll::Lowercase => variant_name.to_lowercase(),
+        RenameAll::Uppercase => variant_name.to_uppercase(),
+        RenameAll::PascalCase => variant_name.to_string(), // Already PascalCase
+        RenameAll::CamelCase => {
+            let mut chars = variant_name.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(first) => first.to_lowercase().collect::<String>() + chars.as_str(),
+            }
+        }
+        RenameAll::SnakeCase => to_snake_case(variant_name),
+        RenameAll::ScreamingSnakeCase => to_snake_case(variant_name).to_uppercase(),
+        RenameAll::KebabCase => to_snake_case(variant_name).replace('_', "-"),
+        RenameAll::ScreamingKebabCase => to_snake_case(variant_name).replace('_', "-").to_uppercase(),
+    }
+}
+
+/// Convert variant name to snake_case for serde serialization
+fn to_snake_case(s: &str) -> String {
+    let mut result = String::new();
+    let mut prev_is_upper = false;
+    
+    for (i, ch) in s.chars().enumerate() {
+        if ch.is_uppercase() {
+            if i > 0 && !prev_is_upper {
+                result.push('_');
+            }
+            result.push(ch.to_lowercase().next().unwrap());
+            prev_is_upper = true;
+        } else {
+            result.push(ch);
+            prev_is_upper = false;
+        }
+    }
+    
+    result
+}
+
+/// Generate schema for enum with internal tagging: `{"type": "variant", ...fields}`
+fn generate_internal_tagged_enum_schema(
+    variants: &syn::punctuated::Punctuated<Variant, syn::token::Comma>,
+    tag_field: &str,
+) -> String {
+    let mut one_of_schemas = Vec::new();
+
+    for variant in variants {
+        let variant_name = variant.ident.to_string();
+        let variant_value = to_snake_case(&variant_name);
+
+        let variant_schema = match &variant.fields {
+            Fields::Unit => {
+                // Unit variant: {"type": "variant_name"}
+                format!(
+                    "{{\"type\":\"object\",\"required\":[\"{}\"],\"properties\":{{\"{}\":{{\"type\":\"string\",\"enum\":[\"{}\"]}}}}}}",
+                    tag_field, tag_field, variant_value
+                )
+            }
+            Fields::Named(fields) => {
+                // Named fields variant: {"type": "variant_name", "field1": ..., "field2": ...}
+                let mut properties = vec![
+                    format!("\"{}\":{{\"type\":\"string\",\"enum\":[\"{}\"]}}", tag_field, variant_value)
+                ];
+                let mut required = vec![format!("\"{}\"", tag_field)];
+
+                for field in fields.named.iter() {
+                    if let Some(field_name) = &field.ident {
+                        let field_name_str = field_name.to_string();
+                        let field_schema = get_type_schema(&field.ty);
+                        properties.push(format!("\"{}\":{}", field_name_str, field_schema));
+
+                        // Check if field is required (not Option)
+                        if !is_option_type(&field.ty) {
+                            required.push(format!("\"{}\"", field_name_str));
+                        }
+                    }
+                }
+
+                format!(
+                    "{{\"type\":\"object\",\"required\":[{}],\"properties\":{{{}}}}}",
+                    required.join(","),
+                    properties.join(",")
+                )
+            }
+            Fields::Unnamed(_) => {
+                // Unnamed fields not typical for internal tagging, treat as object
+                format!(
+                    "{{\"type\":\"object\",\"required\":[\"{}\"],\"properties\":{{\"{}\":{{\"type\":\"string\",\"enum\":[\"{}\"]}}}}}}",
+                    tag_field, tag_field, variant_value
+                )
+            }
+        };
+
+        one_of_schemas.push(variant_schema);
+    }
+
+    format!("{{\"oneOf\":[{}]}}", one_of_schemas.join(","))
+}
+
+/// Generate schema for enum with adjacent tagging using OpenAPI discriminator pattern
+/// This creates a oneOf with references to named variant schemas for cleaner output
+fn generate_adjacent_tagged_enum_schema(
+    variants: &syn::punctuated::Punctuated<Variant, syn::token::Comma>,
+    tag_field: &str,
+    _content_field: &str,
+) -> String {
+    let mut one_of_refs = Vec::new();
+    let mut mapping_entries = Vec::new();
+
+    for variant in variants {
+        let variant_name = variant.ident.to_string();
+        let variant_value = to_snake_case(&variant_name);
+        
+        // Only create refs for variants with data (unnamed fields with inner types)
+        if let Fields::Unnamed(fields) = &variant.fields {
+            if fields.unnamed.len() == 1 {
+                if let Type::Path(type_path) = &fields.unnamed.first().unwrap().ty {
+                    if let Some(segment) = type_path.path.segments.last() {
+                        let inner_type = segment.ident.to_string();
+                        // Only create refs for custom types, not primitives
+                        if !matches!(inner_type.as_str(), 
+                            "String" | "str" | "i8" | "i16" | "i32" | "i64" | "i128" | "isize" |
+                            "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | 
+                            "f32" | "f64" | "bool" | "Vec" | "HashMap" | "BTreeMap") {
+                            
+                            one_of_refs.push(format!("{{\"$ref\":\"#/components/schemas/{}\"}}", inner_type));
+                            mapping_entries.push(format!("\"{}\":\"#/components/schemas/{}\"", variant_value, inner_type));
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Fallback for unit variants or primitives - inline them
+        let variant_schema = match &variant.fields {
+            Fields::Unit => {
+                format!(
+                    "{{\"type\":\"object\",\"required\":[\"{}\"],\"properties\":{{\"{}\":{{\"type\":\"string\",\"enum\":[\"{}\"]}}}}}}",
+                    tag_field, tag_field, variant_value
+                )
+            }
+            _ => {
+                // For other cases, create a simple inline schema
+                format!(
+                    "{{\"type\":\"object\",\"required\":[\"{}\"],\"properties\":{{\"{}\":{{\"type\":\"string\",\"enum\":[\"{}\"]}}}}}}",
+                    tag_field, tag_field, variant_value
+                )
+            }
+        };
+        one_of_refs.push(variant_schema);
+    }
+
+    // Generate with discriminator if we have mapping entries
+    if !mapping_entries.is_empty() {
+        format!(
+            "{{\"oneOf\":[{}],\"discriminator\":{{\"propertyName\":\"{}\",\"mapping\":{{{}}}}}}}",
+            one_of_refs.join(","),
+            tag_field,
+            mapping_entries.join(",")
+        )
+    } else {
+        format!("{{\"oneOf\":[{}]}}", one_of_refs.join(","))
+    }
+}
+
+/// Check if a type is Option<T>
+fn is_option_type(ty: &Type) -> bool {
+    if let Type::Path(type_path) = ty {
+        if let Some(segment) = type_path.path.segments.last() {
+            return segment.ident == "Option";
+        }
+    }
+    false
+}
+
+/// Get the JSON schema for a type
+fn get_type_schema(ty: &Type) -> String {
+    if let Type::Path(type_path) = ty {
+        if let Some(segment) = type_path.path.segments.last() {
+            let type_name = segment.ident.to_string();
+            match type_name.as_str() {
+                "String" | "str" => return "{\"type\":\"string\"}".to_string(),
+                "i8" | "i16" | "i32" | "i64" | "i128" | "isize" => return "{\"type\":\"integer\"}".to_string(),
+                "u8" | "u16" | "u32" | "u64" | "u128" | "usize" => return "{\"type\":\"integer\"}".to_string(),
+                "f32" | "f64" => return "{\"type\":\"number\"}".to_string(),
+                "bool" => return "{\"type\":\"boolean\"}".to_string(),
+                "Vec" => return "{\"type\":\"array\"}".to_string(),
+                "HashMap" | "BTreeMap" => return "{\"type\":\"object\"}".to_string(),
+                "Uuid" => return "{\"type\":\"string\",\"format\":\"uuid\"}".to_string(),
+                "Option" => return "{\"type\":\"string\"}".to_string(),
+                _ => return format!("{{\"$ref\":\"#/components/schemas/{}\"}}", type_name),
+            }
+        }
+    }
+    "{\"type\":\"string\"}".to_string()
+}
+
 /// Generate schema for enum variants with external tagging
 fn generate_external_tagged_enum_schema(
     variants: &syn::punctuated::Punctuated<Variant, syn::token::Comma>,
+    attrs: &[Attribute],
 ) -> String {
+    // Check if all variants are unit variants (simple enum)
+    let all_unit_variants = variants.iter().all(|v| matches!(v.fields, Fields::Unit));
+    
+    if all_unit_variants {
+        // Parse rename_all to determine how to transform variant names
+        let rename_all = parse_rename_all(attrs);
+        
+        // Generate a simple string enum with all variant names
+        let variant_values: Vec<String> = variants.iter()
+            .map(|v| {
+                let variant_name = v.ident.to_string();
+                // Apply rename transformation
+                format!("\"{}\"", apply_rename_all(&variant_name, &rename_all))
+            })
+            .collect();
+        
+        return format!("{{\"type\":\"string\",\"enum\":[{}]}}", variant_values.join(","));
+    }
+    
+    // Otherwise, generate oneOf with object variants
     let mut one_of_schemas = Vec::new();
 
     for variant in variants {
@@ -1217,16 +1534,35 @@ pub fn derive_openapi_schema(input: TokenStream) -> TokenStream {
             }
         }
         Data::Enum(data_enum) => {
-            // Generate oneOf schema for enums with external tagging
-            generate_external_tagged_enum_schema(&data_enum.variants)
+            // Determine tagging strategy from serde attributes
+            let tagging = parse_enum_tagging(&input.attrs);
+            
+            match tagging {
+                EnumTagging::External => {
+                    generate_external_tagged_enum_schema(&data_enum.variants, &input.attrs)
+                }
+                EnumTagging::Internal { tag } => {
+                    generate_internal_tagged_enum_schema(&data_enum.variants, &tag)
+                }
+                EnumTagging::Adjacent { tag, content } => {
+                    generate_adjacent_tagged_enum_schema(&data_enum.variants, &tag, &content)
+                }
+                EnumTagging::Untagged => {
+                    // For untagged enums, generate oneOf with variant schemas directly
+                    generate_external_tagged_enum_schema(&data_enum.variants, &input.attrs)
+                }
+            }
         }
         _ => "{\"type\":\"string\"}".to_string(),
     };
 
+    // Convert the schema_json String into a LitStr for embedding as a string literal
+    let schema_json_lit = syn::LitStr::new(&schema_json, name.span());
+
     let expanded = quote! {
         impl machined_openapi_gen::OpenApiSchema for #name {
             fn schema() -> String {
-                #schema_json.to_string()
+                #schema_json_lit.to_string()
             }
         }
 
@@ -1234,7 +1570,7 @@ pub fn derive_openapi_schema(input: TokenStream) -> TokenStream {
         machined_openapi_gen::inventory::submit! {
             machined_openapi_gen::SchemaRegistration {
                 type_name: #name_str,
-                schema_json: #schema_json,
+                schema_json: #schema_json_lit,
             }
         }
     };
